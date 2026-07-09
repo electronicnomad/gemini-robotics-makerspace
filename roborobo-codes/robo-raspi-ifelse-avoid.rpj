@@ -1,0 +1,181 @@
+RogicCode
+004
+MAIN
+{
+    WHILE    
+    {
+PORT_ON    4  
+    IF     (INPUT_PORT 07)
+    {
+PORT_ON    5  
+DIRECTION
+ON 1 B 3
+ON 2 B 3
+OFF
+OFF
+DELAY    1.0
+    RAND (INPUT_DELAY 10) ON
+    {
+DIRECTION
+ON 1 F 2
+ON 2 B 2
+OFF
+OFF
+    }
+DIRECTION
+ON 1 B 2
+ON 2 F 2
+OFF
+OFF
+DELAY    0.6
+DIRECTION
+ON 1 B 3
+ON 2 B 3
+OFF
+OFF
+DELAY    0.3
+DIRECTION
+ON 1 F 0
+ON 2 F 0
+OFF
+OFF
+PORT_OFF    5  
+    }
+    else
+    {
+    IF     (INPUT_PORT 06)
+    {
+PORT_ON    5  
+DIRECTION
+ON 1 B 3
+ON 2 B 3
+OFF
+OFF
+DELAY    0.1
+    RAND (INPUT_DELAY 1) ON
+    {
+DIRECTION
+ON 1 F 2
+ON 2 B 2
+OFF
+OFF
+    }
+DIRECTION
+ON 1 B 2
+ON 2 F 2
+OFF
+OFF
+DELAY    0.6
+DIRECTION
+ON 1 B 3
+ON 2 B 3
+OFF
+OFF
+DELAY    0.3
+DIRECTION
+ON 1 F 0
+ON 2 F 0
+OFF
+OFF
+PORT_OFF    5  
+    }
+    else
+    {
+    IF     (INPUT_PORT 05)
+    {
+PORT_ON    5  
+DIRECTION
+ON 1 B 3
+ON 2 B 3
+OFF
+OFF
+DELAY    0.1
+    RAND (INPUT_DELAY 1) ON
+    {
+DIRECTION
+ON 1 F 2
+ON 2 B 2
+OFF
+OFF
+    }
+DIRECTION
+ON 1 B 2
+ON 2 F 2
+OFF
+OFF
+DELAY    0.6
+DIRECTION
+ON 1 B 3
+ON 2 B 3
+OFF
+OFF
+DELAY    0.3
+DIRECTION
+ON 1 F 0
+ON 2 F 0
+OFF
+OFF
+PORT_OFF    5  
+    }
+    else
+    {
+    IF     (INPUT_PORT 01)
+    {
+DIRECTION
+ON 1 F 6
+ON 2 F 6
+OFF
+OFF
+    RAND (INPUT_DELAY 5) ON
+    {
+PORT_ON    3  
+DELAY    0.1
+PORT_OFF    3  
+    }
+    }
+    else
+    {
+    IF     (INPUT_PORT 02)
+    {
+DIRECTION
+ON 1 F 6
+ON 2 B 6
+OFF
+OFF
+    }
+    else
+    {
+    IF     (INPUT_PORT 03)
+    {
+DIRECTION
+ON 1 B 6
+ON 2 F 6
+OFF
+OFF
+    }
+    else
+    {
+    IF     (INPUT_PORT 04)
+    {
+DIRECTION
+ON 1 B 3
+ON 2 B 3
+OFF
+OFF
+    }
+    else
+    {
+DIRECTION
+ON 1 F 0
+ON 2 F 0
+OFF
+OFF
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+}
