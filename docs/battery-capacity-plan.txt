@@ -1,0 +1,52 @@
+================================================================================
+BATTERY POWER SPECIFICATIONS FOR 10,000mAh SETUP (NO SOLAR)
+================================================================================
+
+1. RUNTIME CAPACITY ANALYSIS
+--------------------------------------------------------------------------------
+With your choice of a 10,000mAh battery pack and zero solar input, your total
+deployment runtime depends entirely on the efficiency of your power-saving steps.
+
+* Total Available Energy (Internal 3.7V Cells): 37.0 Watt-hours (Wh)
+* Standard 5V Boost Converter Efficiency    : ~74% 
+* Net Usable Output Capacity (at 5V)         : ~7,400 mAh
+
+Runtime Estimates Based on System Configurations:
+
+* OPTIMIZED CONFIGURATION (CSI Camera, USB Off, Audio/BT Off, Wi-Fi Power Save):
+  - Current Draw: ~300 mA (1.5 Watts)
+  - EXPECTED RUNTIME: ~24.6 Hours (Full Day of continuous operation)
+
+* UNOPTIMIZED CONFIGURATION (Legacy USB Webcam, Full CPU Load, Active USB Bus):
+  - Current Draw: ~1,200 mA (6.0 Watts)
+  - EXPECTED RUNTIME: ~6.1 Hours
+
+
+2. BATTERY CHOICE CRITERIA (WHAT TO LOOK FOR)
+--------------------------------------------------------------------------------
+Since you are not using solar panels to constantly replenish power, ensure your 
+chosen 10,000mAh power bank meets these critical technical requirements:
+
+* Minimum Current Output: Must support at least 5V / 3.0A (15 Watts) on a single
+  USB-C port. Lower output limits (like 5V / 2.1A) can trigger undervoltage 
+  throttling during high-bandwidth Wi-Fi transmission bursts.
+* Pass-Through Charging : Look for a power bank that supports charging while 
+  discharging. This allows you to plug the bank into a wall outlet to charge 
+  the battery without dropping the live Pi stream.
+* Auto-On Feature       : Ensure the power bank automatically delivers power when 
+  a device is connected, rather than requiring a physical button press, which 
+  can complicate enclosed headless deployments.
+
+
+3. DEPLOYMENT & MAINTENANCE CYCLE
+--------------------------------------------------------------------------------
+Because this is a closed loop battery system, manage your swap cycle as follows:
+
+* Daily Swap: Schedule a battery change or recharge window every 20-22 hours to
+  maintain a safe overhead margin before the low-battery script flags an shutdown.
+* Safe Swapping: Do not hot-swap the battery if it cuts power instantly. Thanks
+  to the Read-Only Overlay Filesystem configured earlier, you can simply pull 
+  the dead battery, plug in the fresh one, and the Pi will safely reboot back 
+  into its streaming state with zero disk errors.
+================================================================================
+

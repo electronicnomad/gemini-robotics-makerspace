@@ -1,0 +1,68 @@
+================================================================================
+RASPBERRY PI 4: AUTOMATED SCRIPT BACKUPS & WRITE TROUBLESHOOTING
+================================================================================
+
+1. AUTOMATED CONFIGURATION BACKUP SCRIPT
+--------------------------------------------------------------------------------
+Before locking your system into a read-only state, it is best practice to back 
+up your critical configuration scripts to an external source (like a secondary 
+USB flash drive or a network storage share).
+
+* Create the backup script file:
+  $ nano /home/pi/backup_configs.sh
+
+* Paste the following code into the file:
+  #!/bin/bash
+  # Define target directory (Update this path to your mounted backup drive)
+  BACKUP_DIR="/mnt/backup_drive/pi_power_project"
+  mkdir -p "$BACKUP_DIR"
+
+  # Copy critical configuration and automation files
+  cp /boot/firmware/config.txt "$BACKUP_DIR/config.txt.bak" 2>/dev/null || cp /boot/config.txt "$BACKUP_DIR/config.txt.bak"
+  cp /etc/rc.local "$BACKUP_DIR/rc.local.bak"
+  cp /home/pi/battery_monitor.sh "$BACKUP_DIR/battery_monitor.sh.bak"
+
+  echo "System configurations successfully backed up to $BACKUP_DIR"
+
+* Make the script executable:
+  $ chmod +x /home/pi/backup_configs.sh
+
+* Run it manually anytime before enabling the overlay filesystem:
+  $ /home/pi/backup_configs.sh
+
+
+2. TROUBLESHOOTING FILE SAVE ERRORS (READ-ONLY FAILURES)
+--------------------------------------------------------------------------------
+If you try to save a file or modify a setting and receive a "Read-only file 
+system" or "Permission denied" error, it means your overlay system is active, 
+or your filesystem has auto-mounted as read-only due to an unsafe shutdown.
+
+* Symptom: Nano displays "[ Error writing ...: Read-only file system ]"
+* Symptom: Touch or mkdir commands fail immediately.
+
+* Quick Fix 1: Emergency Temporary Write Access (Without Rebooting)
+  If the storage card itself isn't fully locked down by raspi-config but the 
+  OS partition is acting stuck, force a live remount:
+  $ sudo mount -o remount,rw /
+
+* Quick Fix 2: Clean the Filesystem Journal
+  If an improper battery disconnect corrupted the file mapping slightly, the 
+  kernel locks the drive to prevent further damage. Force a filesystem check:
+  $ sudo umount /dev/mmcblk0p2
+  $ sudo fsck -y /dev/mmcblk0p2
+  (Note: If the system partition is active, running 'sudo touch /forcefsck' 
+  and executing a reboot will force this check securely during startup).
+
+
+3. PRE-DEPLOYMENT CHECKLIST
+--------------------------------------------------------------------------------
+Before unplugging your monitor/keyboard and running the Pi solely on a battery:
+
+[ ] 1. Run the camera locally to verify physical ribbon alignment.
+[ ] 2. Confirm your Pi automatically connects to your destination Wi-Fi access point.
+[ ] 3. Run the backup script to copy your text configs safely.
+[ ] 4. Activate the Overlay Filesystem via raspi-config and reboot.
+[ ] 5. Test pulling the power cord while running, boot up again, and verify that 
+       the system recovers instantly with no corruption warnings.
+================================================================================
+

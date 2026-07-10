@@ -1,0 +1,58 @@
+================================================================================
+RASPBERRY PI 4: READ-ONLY OVERLAY FILESYSTEM (OVERLAYFS)
+================================================================================
+
+1. HOW THE OVERLAY FILESYSTEM WORKS
+--------------------------------------------------------------------------------
+Enabling the native Overlay Filesystem (overlayfs) locks your physical microSD 
+card into a strict read-only state. 
+
+* All logs, temporary files, and system modifications are redirected to a virtual 
+  layer running inside the Pi's volatile RAM.
+* If your battery suddenly dies or the power cord is pulled mid-stream, zero 
+  file corruption can occur because the physical storage is never written to.
+* On reboot, the RAM overlay layer is wiped completely clean, reverting the Pi 
+  back to its original, pristine setup configuration.
+
+
+2. STEP-BY-STEP ENABLING PROCEDURE
+--------------------------------------------------------------------------------
+The safest way to configure this layer is through the built-in system utility:
+
+1. Launch the utility from your terminal:
+   $ sudo raspi-config
+
+2. Use the keyboard arrow keys to navigate to:
+   -> 4 Performance Options (Press Enter)
+
+3. Scroll down and select:
+   -> P3 Overlay File System (Press Enter)
+
+4. When prompted: "Would you like the overlay file system to be enabled?"
+   -> Select <Yes> (Press Enter)
+
+5. When prompted: "Would you like the boot partition to be write-protected?"
+   -> Select <Yes> (Press Enter)
+
+6. Navigate to <Finish>, exit the menu, and confirm the system reboot request.
+
+
+3. MAKING PERMANENT SYSTEM CHANGES IN THE FUTURE
+--------------------------------------------------------------------------------
+Because the storage is locked, any changes made while the overlay is running 
+are deleted on reboot. To make permanent file, script, or Wi-Fi modifications:
+
+1. Temporarily disable the write lock:
+   $ sudo raspi-config
+   -> 4 Performance Options -> P3 Overlay File System -> Select <No>
+   -> Disable boot partition write-protection -> Select <No>
+
+2. Reboot the system:
+   $ sudo reboot
+
+3. Perform your regular updates, script changes, or system maintenance tasks.
+
+4. Repeat the steps in Section 2 to lock the filesystem back down into safe, 
+   low-power deployment mode.
+================================================================================
+
