@@ -12,6 +12,10 @@ A hybrid robotics architecture combining cloud-based multimodal AI (Cortex) with
 
 The system runs on a **Raspberry Pi 4B** linked to a **Roborobo Educational Robotics CPU Board** via bidirectional level shifters, providing real-time vision, voice interaction, emotional behavioral responses, and web-based telemetry HUD monitoring.
 
+The physical robot is constructed using the [ROBO KIT STEP 1 to 3](https://roboroboshop.com/product/list.html?cate_no=173) platform, driven by two DC motors for omnidirectional movement (forward, backward, left, and right). The MCU logic is flashed using the **Rogic Program** (stored in `./robo-rogic-code/`) and interfaces with three infrared (IR) sensors:
+- **2 Front-facing IR Sensors (Floor-directed)**: Continuously monitor the surface beneath the robot. If a black boundary line appears or if the floor disappears (table edge/cliff), the MCU logic immediately stops the robot and steps back.
+- **1 Rear-facing IR Sensor (Backward-directed)**: Detects walls or obstacles approaching from behind. When an obstacle gets too close, the MCU logic stops the robot and moves it forward/away from the barrier.
+
 ```text
 +-----------------------------------------------------------------------------------+
 |                                 CORTEX (Cloud AI)                                 |
@@ -83,9 +87,8 @@ gemini-robotics-makerspace/
 ├── gemini-structured-outputs-guide.md# Guide for Gemini Pydantic structured output migration
 ├── project-analysis-report.md        # Technical architecture analysis report
 ├── LICENSE                           # Open source MIT license
-├── roborobo-codes/                   # Roborobo MCU firmware project files (.rpj)
-│   ├── robo-raspi-ifelse.rpj
-│   └── robo-raspi-ifelse-avoid.rpj
+├── robo-rogic-code/                 # Rogic Program MCU code (.rpj) for Roborobo kit
+│   └── robo-raspi-ifelse-avoid-black-line.rpj
 ├── __tests_and_diagnostics/          # Hardware diagnostic scripts
 │   ├── diagnose_pins.py              # GPIO pin tester
 │   ├── test_motor.py                 # Motor direction test
@@ -185,6 +188,10 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 
 시스템은 **라즈베리 파이 4B**를 두뇌로 삼아 양방향 레벨 시프터를 통해 **로보로보 CPU 보드**와 인터페이싱하며, 실시간 비전, 음성 인식, 감정 반응 동작, 그리고 웹 기반 텔레메트리 HUD 모니터링을 동시에 수행합니다.
 
+현실 세계에서 동작하는 로봇은 [ROBO KIT STEP 1 to 3](https://roboroboshop.com/product/list.html?cate_no=173)을 활용해서 만들었으며, 2개의 DC 모터를 구동하여 전후좌우로 자유롭게 이동합니다. 로보로보 CPU 마이크로컨트롤러에는 전용 **'Rogic Program'**으로 작성된 코드(`./robo-rogic-code/`)가 구동되며, 3개의 적외선(IR) 센서를 통해 하드웨어 반사 동작을 수행합니다:
+- **전면 적외선 센서 2개 (바닥 방향)**: 바닥면을 지속적으로 감시하여 검은색 띠가 나타나거나 바닥이 사라지는 경계(낙하 위험)를 감지하면 로봇이 즉시 멈추고 물러서도록 동작합니다.
+- **후면 적외선 센서 1개 (후방 방향)**: 뒷면을 바라보는 적외선 센서가 벽이나 장애물이 가까워지는 것을 감지하면 로봇이 멈추고 안전거리를 확보하도록 물러서게 설정되어 있습니다.
+
 ```text
 +-----------------------------------------------------------------------------------+
 |                                 CORTEX (Cloud AI)                                 |
@@ -255,9 +262,8 @@ gemini-robotics-makerspace/
 ├── gemini-structured-outputs-guide.md# Gemini Pydantic 구조화 출력 전환 가이드
 ├── project-analysis-report.md        # 시스템 아키텍처 상세 분석 보고서
 ├── LICENSE                           # MIT 오픈소스 라이선스
-├── roborobo-codes/                   # 로보로보 CPU 펌웨어 프로젝트 파일 (.rpj)
-│   ├── robo-raspi-ifelse.rpj
-│   └── robo-raspi-ifelse-avoid.rpj
+├── robo-rogic-code/                 # 로보로보 CPU 마이크로컨트롤러용 Rogic 코드 (.rpj)
+│   └── robo-raspi-ifelse-avoid-black-line.rpj
 ├── __tests_and_diagnostics/          # 하드웨어 자가 진단 스크립트 모음
 │   ├── diagnose_pins.py              # GPIO 핀 테스트
 │   ├── test_motor.py                 # 모터 방향 테스트
