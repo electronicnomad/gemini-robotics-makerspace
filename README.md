@@ -34,7 +34,7 @@ The robot operates through a **dual-tier hybrid AI architecture**:
 3. **Auditory Layer (Voice Commands)**:
    - Listens to microphone audio via `SpeechRecognition` for bilingual Korean and English commands ("이리와 / Come here", "인사 / Hello", "멈춰 / Stop").
 4. **Odometry & Table Safety Layer**:
-   - Tracks 2D coordinates `(X, Y, Heading)` on a `1200mm x 800mm` virtual table. Calculates cross-product vectors $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$ to automatically steer back to center when hitting boundary margins.
+   - Tracks 2D coordinates `(X, Y, Heading)` on a `1200mm x 800mm` virtual table. Calculates cross-product vectors $\text{cross-product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$ to automatically steer back to center when hitting boundary margins.
 5. **Hardware MCU Reflex Layer (`./robo-rogic-code/`)**:
    - Roborobo MCU runs Rogic Program logic for floor tape/cliff detection (2 front IR sensors) and rear obstacle avoidance (1 rear IR sensor).
 
@@ -134,9 +134,9 @@ The system achieves low latency by distributing tasks across **5 background daem
 
 1. **Cross-Product Boundary Recovery Formula**:
    When the robot exceeds the virtual table perimeter (`1200mm x 800mm`), it calculates the cross-product vector from its current coordinates `(X, Y)` and heading angle `θ`:
-   $$\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$$
-   - If $\text{cross\_product} > 0$: Center origin is to the left -> Execute `turn_left()`
-   - If $\text{cross\_product} < 0$: Center origin is to the right -> Execute `turn_right()`
+   $$\text{cross-product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$$
+   - If $\text{cross-product} > 0$: Center origin is to the left -> Execute `turn_left()`
+   - If $\text{cross-product} < 0$: Center origin is to the right -> Execute `turn_right()`
 
 2. **Open-Loop Fail-Safe Uncertainty Accumulator**:
    Open-loop odometry accumulates drift over time. The system tracks an estimated position uncertainty value:
@@ -146,6 +146,21 @@ The system achieves low latency by distributing tasks across **5 background daem
 
 3. **Hardware Race-Condition Protection**:
    All low-level GPIO pin write operations are serialized using `_motor_lock` (Threading Lock) to prevent motor signal corruption when concurrent threads (e.g. emotion expression vs boundary recovery) execute simultaneously.
+
+4. **Odometry Master Toggles & Configuration Parameters (`robot_controller.py`)**:
+   Odometry safety guarding can be easily enabled, disabled, or tuned directly at the top of `robot_controller.py`:
+   - **`ODOMETRY_SAFETY_ENABLED` (Boolean, default: `False`)**:
+     - `True`: Enforces strict software fail-safe boundary checks. If accumulated position drift exceeds `UNCERTAINTY_LIMIT` ($250\text{mm}$), forward motion is locked until re-homed.
+     - `False`: Disables strict software boundary locks, allowing full roaming freedom or relying on hardware IR sensors / cooperative caution mode.
+   - **`EDGE_CAUTION_ENABLED` (Boolean, default: `True`)**:
+     - `True`: Enables cooperative caution mode with the Roborobo CPU board's black-line reflex. When odometry detects the robot nose within $150\text{mm}$ (`EDGE_CAUTION_BAND`) of the boundary line, forward drive is automatically pulsed to 50% speed (`EDGE_PULSE_DUTY = 0.5`), doubling the sensor response time budget.
+   - **Tuning Parameters**:
+     - `SPEED_LINEAR = 260.0`: Linear travel speed ($260\text{mm/s}$).
+     - `SPEED_ANGULAR = 22.5`: Angular rotation speed ($22.5^\circ\text{/s}$).
+     - `TABLE_WIDTH = 1200.0`, `TABLE_DEPTH = 800.0`: Virtual table dimensions in mm.
+     - `UNCERTAINTY_LIMIT = 250.0`: Maximum allowed position drift ($250\text{mm}$) before triggering a fail-safe re-home request.
+   - **Runtime Reset**:
+     Operators can reset coordinates to origin $(0, 0, 90^\circ)$ and zero out uncertainty at runtime via the Flask HUD Dashboard button **`[Reset Odometry]`** (`/api/reset_odometry`).
 
 ---
 
@@ -160,7 +175,7 @@ The system includes four primary interactive demonstration scenarios:
 3. **Bilingual Voice Commands (Auditory)**:
    - Speak natural language commands into the microphone ("이리와 / Come here", "인사 / Hello", "멈춰 / Stop"). The auditory thread translates audio to STT and executes motion triggers.
 4. **Table-Edge Escape & Fail-Safe (Odometry)**:
-   - Drive the robot toward the table edge. When virtual coordinates hit boundary limits (`1200mm x 800mm`), the robot stops and uses vector cross-product math $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$ to automatically steer back toward safety.
+   - Drive the robot toward the table edge. When virtual coordinates hit boundary limits (`1200mm x 800mm`), the robot stops and uses vector cross-product math $\text{cross-product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$ to automatically steer back toward safety.
 
 ---
 
@@ -333,7 +348,7 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 
 기존의 일반적인 교육용이나 장난감 로봇은 센서 입력을 받아 모터를 굴리는 "단순 기계적 반사"만 수행할 뿐, 주변 환경의 맥락을 이해하고 사물을 구별하며 내면의 감정을 나누는 인지 능력을 갖추지 못했습니다.
 
-본 프로젝트는 **Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)** 부스 시연용으로 기획되었으며, 차가운 회로 기판에 **"디지털 영혼과 인공 생명력"**을 불어넣는 것을 목표로 설계되었습니다. 거대 클라우드 AI(Cortex)와 로컬 초고속 제어 루프(Reflex)를 조화롭게 결합하여:
+본 프로젝트는 Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace) 부스 시연용으로 기획되었으며, 차가운 회로 기판에 "디지털 영혼과 인공 생명력"을 불어넣는 것을 목표로 설계되었습니다. 거대 클라우드 AI(Cortex)와 로컬 초고속 제어 루프(Reflex)를 조화롭게 결합하여:
 - 카메라인 시야 속에서 주인과 장난감, 밥그릇 등 주요 사물을 2D 바운딩 박스로 정밀 인식하고,
 - 자신이 무엇을 보고 무엇을 느끼는지 인공지능 내면의 생각(Thought)을 실시간 독백으로 생성하며,
 - 장난감을 보면 기쁘게 짖고, 밥그릇을 보면 애교 소리를 내며, 테이블 낙하 위험 없이 주인을 안전하게 따라다니는 반려형 지능을 구현했습니다.
@@ -353,7 +368,7 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 3. **Auditory 레이어 (청각 신경)**:
    - `SpeechRecognition`을 통해 마이크 음성을 수신하여 한국어 및 영어 음성 명령("이리와", "인사", "멈춰", "Come here", "Hello", "Stop")을 감지하고 동작시킵니다.
 4. **오도메트리 & 테이블 안전 레이어**:
-   - `1200mm x 800mm` 가상 테이블 위에서 2D 좌표 `(X, Y, Heading)`를 실시간 연산하고, 경계 접근 시 외적(Cross Product) 수식 $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$을 연산하여 중앙 원점으로 자동 복귀합니다.
+   - `1200mm x 800mm` 가상 테이블 위에서 2D 좌표 `(X, Y, Heading)`를 실시간 연산하고, 경계 접근 시 외적(Cross Product) 수식 $\text{cross-product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$을 연산하여 중앙 원점으로 자동 복귀합니다.
 5. **하드웨어 MCU 반사 레이어 (`./robo-rogic-code/`)**:
    - 로보로보 CPU 보드의 Rogic 코드가 전면 적외선 센서 2개(바닥 띠 및 낭떠러지 감지)와 후면 적외선 센서 1개(후방 벽/장애물 접근 감지)를 하드웨어 수준에서 직접 제어하여 물러서도록 가동합니다.
 
@@ -363,7 +378,7 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 
 시스템은 **라즈베리 파이 4B**를 두뇌로 삼아 양방향 레벨 시프터를 통해 **로보로보 CPU 보드**와 인터페이싱하며, 실시간 비전, 음성 인식, 감정 반응 동작, 그리고 웹 기반 텔레메트리 HUD 모니터링을 동시에 수행합니다.
 
-현실 세계에서 동작하는 로봇은 [ROBO KIT STEP 1 to 3](https://roboroboshop.com/product/list.html?cate_no=173)을 활용해서 만들었으며, 2개의 DC 모터를 구동하여 전후좌우로 자유롭게 이동합니다. 로보로보 CPU 마이크로컨트롤러에는 전용 **'Rogic Program'**으로 작성된 코드(`./robo-rogic-code/`)가 구동되며, 3개의 적외선(IR) 센서를 통해 하드웨어 반사 동작을 수행합니다:
+현실 세계에서 동작하는 로봇은 [ROBO KIT STEP 1 to 3](https://roboroboshop.com/product/list.html?cate_no=173)을 활용해서 만들었으며, 2개의 DC 모터를 구동하여 전후좌우로 자유롭게 이동합니다. 로보로보 CPU 마이크로컨트롤러에는 전용 'Rogic Program'으로 작성된 코드(`./robo-rogic-code/`)가 구동되며, 3개의 적외선(IR) 센서를 통해 하드웨어 반사 동작을 수행합니다:
 - **전면 적외선 센서 2개 (바닥 방향)**: 바닥면을 지속적으로 감시하여 검은색 띠가 나타나거나 바닥이 사라지는 경계(낙하 위험)를 감지하면 로봇이 즉시 멈추고 물러서도록 동작합니다.
 - **후면 적외선 센서 1개 (후방 방향)**: 뒷면을 바라보는 적외선 센서가 벽이나 장애물이 가까워지는 것을 감지하면 로봇이 멈추고 안전거리를 확보하도록 물러서게 설정되어 있습니다.
 
@@ -452,18 +467,33 @@ graph TD
 
 1. **외적(Cross-Product) 경계 복귀 수식**:
    로봇이 테이블 가상 경계(`1200mm x 800mm`)를 이탈하면, 현재 좌표 `(X, Y)`와 진행 각도 `θ`를 기반으로 원점 방향 외적을 계산합니다:
-   $$\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$$
-   - $\text{cross\_product} > 0$ 인 경우: 원점이 로봇 기준 좌측에 위치 -> 좌회전(`turn_left`) 실행
-   - $\text{cross\_product} < 0$ 인 경우: 원점이 로봇 기준 우측에 위치 -> 우회전(`turn_right`) 실행
+   $$\text{cross-product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$$
+   - $\text{cross-product} > 0$ 인 경우: 원점이 로봇 기준 좌측에 위치 -> 좌회전(`turn_left`) 실행
+   - $\text{cross-product} < 0$ 인 경우: 원점이 로봇 기준 우측에 위치 -> 우회전(`turn_right`) 실행
 
 2. **오픈루프 위치 불확실성 누적기 (Fail-Safe)**:
    엔코더가 없는 오픈루프 주행 오차 누적에 대비하여 불확실성 연산치를 지속 누적합니다:
    - 주행 $1\text{mm}$ 당 $+0.04\text{mm}$ 오차 누적 (이동 거리의 약 4%)
    - 회전 $1^\circ$ 당 $+0.25\text{mm}$ 오차 누적 (60° 회전 시 약 15mm 오차)
-   - 누적 불확실성이 **$250\text{mm}$**를 초과하면 로봇 주행을 정지하고 원점 재배치(Re-home)를 요청합니다.
+   - 누적 불확실성이 $250\text{mm}$를 초과하면 로봇 주행을 정지하고 원점 재배치(Re-home)를 요청합니다.
 
 3. **하드웨어 레이스 조건 방지 (`_motor_lock`)**:
    감정 표현 스레드와 오도메트리 경계 복귀 스레드가 물리 GPIO 핀에 동시에 접근할 때 발생하는 구동 신호 꼬임을 방지하기 위해 로우레벨 GPIO 쓰기 구문 전체를 `_motor_lock` (Threading Lock)으로 직렬화했습니다.
+
+4. **오도메트리 스위치 온/오프 및 옵션 설정 방법 (`robot_controller.py`)**:
+   오도메트리 가드 모드는 `robot_controller.py` 상단 스위치 변수 및 파라미터를 수정하여 자유롭게 켜거나 끄고 조정할 수 있습니다:
+   - **`ODOMETRY_SAFETY_ENABLED` (Boolean, 기본값: `False`)**:
+     - `True`: 엄격한 소프트웨어 안전 경계 및 오차 한계 차단 활성화. 위치 불확실성이 `UNCERTAINTY_LIMIT` ($250\text{mm}$)를 초과하면 정지 및 Re-home 요구.
+     - `False`: 소프트웨어 한계 차단을 해제하여 주행 제약을 풀고 로보로보 하드웨어 적외선 센서 및 협응 주의 모드에 의존.
+   - **`EDGE_CAUTION_ENABLED` (Boolean, 기본값: `True`)**:
+     - `True`: 로보로보 CPU 보드의 검은색 띠 반사 로직과 협응하는 센서 주의 모드. 오도메트리상 센서 위치가 경계선 $150\text{mm}$(`EDGE_CAUTION_BAND`) 이내에 접근하면 전진 속도를 50% 주행 비율(`EDGE_PULSE_DUTY = 0.5`)로 감속 제어하여 적외선 센서 반응 시간을 2배 확보합니다.
+   - **주요 튜닝 파라미터**:
+     - `SPEED_LINEAR = 260.0`: 직선 주행 속도 ($260\text{mm/s}$).
+     - `SPEED_ANGULAR = 22.5`: 회전 제어 속도 ($22.5^\circ\text{/s}$).
+     - `TABLE_WIDTH = 1200.0`, `TABLE_DEPTH = 800.0`: 가상 테이블 규격 ($1200\text{mm} \times 800\text{mm}$).
+     - `UNCERTAINTY_LIMIT = 250.0`: Fail-Safe가 발동되는 최대 누적 오차 한계치 ($250\text{mm}$).
+   - **실시간 리셋 가동**:
+     실행 중 언제든지 웹 HUD 대시보드의 **`[Reset Odometry]`** 버튼 (`/api/reset_odometry`)을 클릭하면 현재 위치가 원점 $(0, 0, 90^\circ)$으로 즉시 재설정되고 누적 오차가 초기화됩니다.
 
 ---
 
@@ -478,7 +508,7 @@ graph TD
 3. **양방향 음성 제어 시연 (Auditory)**:
    - 마이크에 대고 자연어 명령("이리와", "인사", "멈춰", "Come here", "Hello", "Stop")을 말하면 구글 STT 분석을 거쳐 로봇이 해당 동작을 가동합니다.
 4. **테이블 경계 구출 및 안전 제어 (Odometry)**:
-   - 로봇을 테이블 모서리 방향으로 이동시키면 가상 경계(`1200mm x 800mm`) 접근 시 멈춰 서서 외적 수식 $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$을 연산해 중앙 안쪽으로 우아하게 회전해 복귀합니다.
+   - 로봇을 테이블 모서리 방향으로 이동시키면 가상 경계(`1200mm x 800mm`) 접근 시 멈춰 서서 외적 수식 $\text{cross-product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$을 연산해 중앙 안쪽으로 우아하게 회전해 복귀합니다.
 
 ---
 
