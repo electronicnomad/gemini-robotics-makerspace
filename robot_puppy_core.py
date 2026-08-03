@@ -9,7 +9,7 @@ model with Raspberry Pi 4B.
 
 - Cortex: Google Cloud Gemini Robotics-ER 1.6 Preview asynchronous object detection and high-level reasoning.
 - Reflex: Local 30 FPS real-time owner face tracking (Gemini-guided) and direct DC motor tracking control.
-- Auditory: speech_recognition-based vocal commands (supports "Hello", "Come", "Stop", etc. with real-time response).
+- Auditory: voice commands recognized by Gemini audio (local VAD captures the spoken utterance) for simple motion control (come, stop, forward, backward, turn, spin).
 - HUD Dashboard: Google AI Studio style premium dark-mode real-time web dashboard (Port 5000, 100% English, Inter font).
 ================================================================================
 """
@@ -17,6 +17,17 @@ model with Raspberry Pi 4B.
 import os
 import sys
 import math
+import io
+import wave
+import asyncio
+
+# 🛡️ Force UTF-8 encoding on stdout/stderr to prevent fatal UnicodeEncodeError crashes 
+# when printing emojis (🤖, 🧸, 🔴) in background threads on remote Raspberry Pi terminals or SSH.
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 
 # ==========================================
 # ⚙️ Load environment variables from .env file (python-dotenv preferred)
@@ -57,7 +68,7 @@ import random
 import numpy as np
 import cv2
 from flask import Flask, Response, render_template_string, jsonify, request
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 # ==========================================
 # 🔇 Mute ALSA & Jack audio warning logs (CTypes)
@@ -158,17 +169,15 @@ except Exception as e:
             print("[SOUND MOCK] 🔊 Beep!")
         def express_happy(self):
             print("[MOTION MOCK] 🕺 Joyful Tail-Wagging Dance!")
+        def line_signal_active(self):
+            return False
+        def anchor_to_boundary_line(self):
+            return False
     robot = MockRobotController()
 
-# Attempting Speech Recognition initialization
+# Voice commands are recognized by sending a short captured utterance to Gemini
+# (audio understanding). SPEECH_AVAILABLE is finalized after the google-genai import below.
 SPEECH_AVAILABLE = False
-try:
-    import speech_recognition as sr
-    SPEECH_AVAILABLE = True
-    print("✅ [AUDITORY] SpeechRecognition package loaded successfully.")
-except ImportError:
-    sr = None
-    print("⚠️ [AUDITORY] SpeechRecognition package not found. Vocal interaction disabled.")
 
 # Attempting google-genai initialization
 GEMINI_AVAILABLE = False
@@ -179,6 +188,9 @@ try:
 except ImportError:
     genai = None
     types = None
+
+# Voice recognition uses Gemini audio, so the auditory layer needs google-genai.
+SPEECH_AVAILABLE = GEMINI_AVAILABLE
 
 # Attempting Pydantic models initialization for Structured Outputs
 PYDANTIC_AVAILABLE = False
@@ -202,19 +214,56 @@ if GEMINI_AVAILABLE:
 # ==========================================
 # 🎛️ Tunable Vision & Behavior Constants
 # ==========================================
-FACE_DETECT_INTERVAL = 5             # Detect faces every N frames (~160ms at 30fps)
-FACE_DETECT_SCALE_FACTOR = 1.05      # Haar cascade scale factor (lower = more sensitive)
-FACE_DETECT_MIN_NEIGHBORS = 3        # Haar cascade minimum neighbors
-FACE_DETECT_MIN_SIZE = (30, 30)      # Minimum face size in pixels (at 320x240 scale)
+# Perception: Gemini Robotics-ER is the authority on who/where the target is; a local
+# visual tracker follows that target smoothly between the ~1.5s Gemini verdicts.
+GEMINI_LOST_VERDICTS = 2             # consecutive Gemini "no owner" verdicts before dropping the target
+TRACKER_DOWNSCALE = 0.5             # run the local tracker on a downscaled frame to save Pi CPU (0.5 -> 320x240)
+TRACKER_UPDATE_EVERY = 1            # run tracker.update() every N vision frames (raise if CPU is too high)
 
-ALIGN_LEFT_THRESHOLD = 0.35          # X ratio below which robot turns left
-ALIGN_RIGHT_THRESHOLD = 0.65         # X ratio above which robot turns right
+# Stale-anchor guard: a Gemini verdict describes a frame captured 1.5-3s earlier. If the
+# robot turned/moved since, those box coordinates point at the WRONG place - anchoring
+# the tracker there makes it track background and wander off. Verdicts that fail this
+# freshness check are used only as "the owner exists" evidence, never as spatial anchors.
+ANCHOR_MAX_TURN_DEG = 10.0           # max heading change since the frame was captured
+ANCHOR_MAX_MOVE_MM = 50.0            # max position change since the frame was captured
+
+# Sighting hold: when a verdict SEES a person but its coordinates are stale (the robot
+# was moving), freeze and stare - the immediately re-triggered verdict is then captured
+# while stationary, passes the freshness guard, and produces the actual lock-on.
+# Without this the robot can look straight at a face and keep scanning past it.
+SIGHTING_HOLD_S = 4.5                # long enough for one full Gemini capture+verdict cycle
+
+ALIGN_LEFT_THRESHOLD = 0.43          # X ratio below which robot turns left (narrow center band for tighter centering)
+ALIGN_RIGHT_THRESHOLD = 0.57         # X ratio above which robot turns right (widen back toward 0.35/0.65 if it hunts/oscillates)
 DISTANCE_FAR_THRESHOLD = 0.32        # Height ratio below which robot moves forward
 DISTANCE_CLOSE_THRESHOLD = 0.48      # Height ratio above which robot moves backward
 EMERGENCY_EVADE_THRESHOLD = 0.60     # Height ratio above which emergency evasion triggers
 
 FOLLOWING_LOST_GRACE_TICKS = 90      # Ticks to wait before FOLLOWING -> SEARCHING (~3s)
 DOZING_TIMEOUT_TICKS = 1080          # Ticks of no detection before entering DOZING (~36s)
+
+# When the locked owner briefly vanishes, fidget in place like a restless pet (short
+# look-around bursts) instead of standing perfectly still, for a bit of personality.
+# Each entry is (motor_action, ticks_to_hold); the sequence loops during the wait.
+RESTLESS_FIDGET = [
+    ("turn_left", 3), ("stop", 4), ("turn_right", 3), ("stop", 4),
+    ("move_forward", 2), ("stop", 5), ("move_backward", 2), ("stop", 6),
+]
+FIDGET_START_TICKS = 12              # consecutive tracker-miss frames (~0.4s) before fidgeting kicks in;
+                                     # brief one-frame dropouts keep the last motor command instead
+                                     # (reacting instantly made following and fidgeting fight at frame rate)
+TURN_REVERSE_DWELL_S = 0.15          # minimum time before an alignment turn may reverse direction (anti-chatter)
+
+# Line-detect feedback (Roborobo board -> BCM 24): while HIGH the board's own reflex
+# owns the motors; the Pi yields completely and anchors odometry to the marker line.
+LINE_EVENT_GAP_S = 0.5               # gaps shorter than this merge into ONE event (observed 2ms re-trigger gaps)
+LINE_YIELD_HOLD_S = 0.8              # keep yielding this long after the signal drops (let the reflex finish cleanly)
+
+# When the owner is lost for good, drive back to the home base (0, 0) before resuming
+# the scan, instead of searching from wherever it happened to lose track.
+RETURN_HOME_ON_LOSS = True           # False -> keep the old in-place search-on-loss behavior
+HOME_POSITION_TOLERANCE = 70.0       # mm from origin treated as "home reached"
+HOME_HEADING_TOLERANCE = 18.0        # deg heading error above which we turn in place toward home first
 
 OBJECT_STALE_TIMEOUT = 4.0           # Seconds before Gemini object overlays expire
 
@@ -226,6 +275,10 @@ STREAM_SERVE_INTERVAL = 0.05         # ~20 FPS web streaming yield interval (sec
 # ==========================================
 # 🧠 Global system coordination state variables
 # ==========================================
+# Build tag printed at startup: bump when deploying so a stale copy on the Pi is
+# immediately visible in the console (deployment-mismatch debugging).
+CORE_BUILD = "2026-07-13g live-session persistence + anchor clamp"
+
 CURRENT_STATE = "SEARCHING"          # SEARCHING, FOLLOWING, DANCED, STAY
 RAW_FRAME = None                     # Real-time raw camera or simulation frame
 STREAM_RESOLUTION = (512, 384)       # Dynamic web stream resolution
@@ -234,18 +287,27 @@ LATEST_JPEG_BYTES = None             # High-speed encoded byte cache for real-ti
 RUNNING = True                       # Multi-thread lifecycle holder
 DETECTED_OBJECTS = []                # Real-time robotics pointer labels cache
 LAST_DETECTION_TIME = 0.0            # Timestamp of the last object detection API update
+DASHBOARD_OBJECTS = []               # Real-time normalized objects cache for HTML/CSS vector overlays
+
 CAMERA_ACTIVE = False                # Flag indicating if the USB camera is active
 LATEST_BBOX = None                   # Real-time cortex target bounding box (ymin, xmin, ymax, xmax)
-OWNER_DESCRIPTION = "A person" # Owner characteristics description
+LATEST_BBOX_SEQ = 0                   # Bumped by the Gemini thread on every verdict; vision thread consumes fresh ones
+LATEST_BBOX_POSE = None               # (theta, x, y) of the robot when the verdict's frame was CAPTURED (stale-anchor guard)
+OWNER_DESCRIPTION = "The primary human owner's face" # Owner characteristics description (used by the Gemini cortex to identify the person)
 GEMINI_STATUS = "SIMULATION"         # Gemini API status: ACTIVE, SIMULATION, ERROR
+LAST_THOUGHT = "System initialized. Standing by." # Live robot mind thoughts log cache
+
 
 # Coordination and Synchronization primitives
 gemini_trigger_event = threading.Event() # Event to trigger immediate Gemini API request
+voice_abort_event = threading.Event()    # Set to cut short a running voice motor burst (new command preempts old)
 gaze_start_time = 0.0                # Timestamp of when the local gaze inspection began
 
 # Global lock and busy flags for thread safety and state coordination
 state_lock = threading.Lock()
 is_robot_busy = False                 # Flag to temporarily block control loop for emotional/vocal tasks
+current_voice_intent = None           # Intent of the voice burst currently executing (None when idle)
+autonomy_hold_until = 0.0             # Until this timestamp, autonomous driving is paused (set by voice commands)
 
 # Background real-time camera byte/frame cache and dedicated lock
 LATEST_CAMERA_FRAME = None
@@ -262,24 +324,87 @@ COLOR_WHITE = (255, 255, 255)
 # ==========================================
 # 📐 Google Robotics UI style rendering helper functions
 # ==========================================
+# Crisp anti-aliased TrueType label rendering (matches the Gemini Robotics
+# point-to-object docs style, instead of the blocky OpenCV Hershey font).
+_FONT_PATH_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+]
+_FONT_CACHE = {}
+
+def _get_label_font(size):
+    """Returns a cached TrueType font at the given pixel size (falls back to PIL default)."""
+    key = int(size)
+    if key not in _FONT_CACHE:
+        font = None
+        for path in _FONT_PATH_CANDIDATES:
+            if os.path.exists(path):
+                try:
+                    font = ImageFont.truetype(path, key)
+                    print(f"✅ [FONT] Label font resolved: {path} @ {key}px")
+                    break
+                except Exception:
+                    continue
+        if font is None:
+            # No TrueType font found. On a minimal Ubuntu image this yields a tiny
+            # bitmap font (size ignored) -> install fonts: sudo apt install fonts-dejavu-core
+            font = ImageFont.load_default()
+            print("⚠️ [FONT] No TrueType font found; falling back to low-res bitmap. "
+                  "Run: sudo apt install fonts-dejavu-core")
+        _FONT_CACHE[key] = font
+    return _FONT_CACHE[key]
+
+def measure_label_pil(text, font_size):
+    """Returns (width, height) in pixels for a label rendered at font_size."""
+    font = _get_label_font(font_size)
+    try:
+        width = int(round(font.getlength(text)))
+    except AttributeError:
+        bbox = font.getbbox(text)
+        width = bbox[2] - bbox[0]
+    ascent, descent = font.getmetrics()
+    return width, ascent + descent
+
+def draw_label_pil(img, text, org, color_bgr, font_size):
+    """Draws anti-aliased TrueType text onto a BGR OpenCV image in place.
+    `org` is the top-left corner (x, y). Text blends over whatever is already
+    drawn (e.g. the caption fill), so call this AFTER drawing the background.
+
+    Only the small text bounding-box region is round-tripped through PIL (not the
+    whole frame), to keep per-label cost low on the Raspberry Pi 4B / ARM."""
+    font = _get_label_font(font_size)
+    x, y = int(org[0]), int(org[1])
+    text_w, text_h = measure_label_pil(text, font_size)
+
+    h_img, w_img = img.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    # +2px margin so anti-aliased edges/descenders are not clipped
+    x1, y1 = min(w_img, x + text_w + 2), min(h_img, y + text_h + 2)
+    if x1 <= x0 or y1 <= y0:
+        return  # fully off-screen, nothing to draw
+
+    region = img[y0:y1, x0:x1]
+    pil_region = Image.fromarray(cv2.cvtColor(region, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_region)
+    color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
+    draw.text((x - x0, y - y0), text, font=font, fill=color_rgb)
+    region[:] = cv2.cvtColor(np.array(pil_region), cv2.COLOR_RGB2BGR)
+
 def draw_google_style_box(img, label, x, y, w, h, color):
     """Draws a technical design label box matching the Google AI Studio GUI."""
     cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.45
-    thickness = 1
-    (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
-    
-    tab_x1, tab_y1 = x, y - text_h - 12
-    tab_x2, tab_y2 = x + text_w + 14, y
+    font_size = 16
+    pad_x, pad_y = 8, 5
+    text_w, text_h = measure_label_pil(label, font_size)
+
+    tab_x1, tab_y1 = x, y - text_h - pad_y * 2
+    tab_x2, tab_y2 = x + text_w + pad_x * 2, y
     if tab_y1 < 0:
-        tab_y1, tab_y2 = y, y + text_h + 12
-        text_y = y + text_h + 6
-    else:
-        text_y = y - 6
-        
+        tab_y1, tab_y2 = y, y + text_h + pad_y * 2
+
     cv2.rectangle(img, (tab_x1, tab_y1), (tab_x2, tab_y2), color, -1)
-    cv2.putText(img, label, (x + 7, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    draw_label_pil(img, label, (tab_x1 + pad_x, tab_y1 + pad_y), (255, 255, 255), font_size)
 
 def draw_rounded_rectangle(img, pt1, pt2, color, thickness=-1, r=10):
     """Draws a sophisticated rounded rectangle (caption flag) using OpenCV."""
@@ -327,50 +452,52 @@ def draw_google_robotics_pointer(img, label, xmin, ymin, xmax, ymax):
     cx = (px_min + px_max) // 2
     cy = (py_min + py_max) // 2
     blue_color = (255, 102, 43)
-    
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.35
-    thickness = 1
-    (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
-    
-    cap_h = text_h + 10
-    cap_w = text_w + 14
-    
+
+    font_size = 14
+    pad_x, pad_y = 9, 5
+    text_w, text_h = measure_label_pil(label, font_size)
+
+    cap_h = text_h + pad_y * 2
+    cap_w = text_w + pad_x * 2
+
     cap_x1 = cx + 8
     cap_y1 = cy - cap_h // 2
     cap_x2 = cap_x1 + cap_w
     cap_y2 = cy + cap_h // 2
-    
+
     if cap_x2 > w_img:
         cap_x2 = cx - 8
         cap_x1 = cap_x2 - cap_w
-        
+
     draw_rounded_rectangle(img, (cap_x1, cap_y1), (cap_x2, cap_y2), blue_color, thickness=-1, r=cap_h // 2)
-    cv2.putText(img, label, (cap_x1 + 7, cy + text_h // 2 - 1), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
-    
+    draw_label_pil(img, label, (cap_x1 + pad_x, cap_y1 + pad_y), (255, 255, 255), font_size)
+
     cv2.circle(img, (cx, cy), 6, (255, 255, 255), 1, cv2.LINE_AA)
     cv2.circle(img, (cx, cy), 4, blue_color, -1, cv2.LINE_AA)
 
 def create_simulated_frame(tick):
-    """Virtual object/person detection simulation frame shown when the camera is inactive (640x480 VGA)"""
+    """Virtual person detection simulation frame shown when the camera is inactive (640x480 VGA)"""
     img = np.zeros((480, 640, 3), dtype=np.uint8)
     for i in range(0, 480, 60):
         cv2.line(img, (0, i), (640, i), (18, 19, 23), 1)
     for i in range(0, 640, 60):
         cv2.line(img, (i, 0), (i, 480), (18, 19, 23), 1)
-        
+
     cx = int(320 + 160 * np.sin(tick * 0.04))
     cy = int(240 + 70 * np.cos(tick * 0.02))
     r = 60
-    
+
+    # Render a standard human face placeholder
     cv2.circle(img, (cx, cy), r, (75, 78, 84), -1)
     cv2.circle(img, (cx, cy), r, (110, 115, 122), 1)
+    # Eyes
     cv2.circle(img, (cx - 18, cy - 12), 6, (255, 255, 255), -1)
     cv2.circle(img, (cx + 18, cy - 12), 6, (255, 255, 255), -1)
+    # Smile
     cv2.ellipse(img, (cx, cy + 16), (16, 8), 0, 0, 180, (0, 0, 255), 4)
-    
-    cv2.putText(img, "SIMULATING ACTIVE EYE FEED (VGA)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 105, 115), 1, cv2.LINE_AA)
-    
+
+    cv2.putText(img, "SIMULATING EYE FEED: HUMAN FACE", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 105, 115), 1, cv2.LINE_AA)
+
     # Return mock face bounding box coordinates normalized to 0~1000 range
     ymin = int((cy - r) * 1000 / 480)
     xmin = int((cx - r) * 1000 / 640)
@@ -379,6 +506,69 @@ def create_simulated_frame(tick):
     
     mock_face_box = (cx - r, cy - r, r*2, r*2)
     return img, mock_face_box, [ymin, xmin, ymax, xmax]
+
+def _restless_action(phase_tick):
+    """Pick the current fidget motor action from RESTLESS_FIDGET for the given phase tick."""
+    total = sum(d for _, d in RESTLESS_FIDGET)
+    if total <= 0:
+        return "stop"
+    t = phase_tick % total
+    acc = 0
+    for action, d in RESTLESS_FIDGET:
+        acc += d
+        if t < acc:
+            return action
+    return "stop"
+
+_tracker_type_logged = False
+
+def _create_tracker():
+    """Create the best available OpenCV single-object tracker, or None if none exists.
+    Prefers CSRT (accurate) then KCF (fast); falls back to MIL (bundled with plain
+    opencv-python) and to the legacy/contrib namespace. A fresh instance is returned
+    per target, so call this again on every Gemini re-anchor."""
+    global _tracker_type_logged
+
+    def _made(name, ctor):
+        global _tracker_type_logged
+        if not _tracker_type_logged:
+            _tracker_type_logged = True
+            quality = "good" if ("CSRT" in name or "KCF" in name) else \
+                      "WEAK fallback - install opencv-contrib-python for CSRT/KCF"
+            print(f"[TRACKER] Using {name} ({quality}).")
+        return ctor()
+
+    for name in ("TrackerCSRT_create", "TrackerKCF_create", "TrackerMIL_create"):
+        ctor = getattr(cv2, name, None)
+        if ctor is not None:
+            try:
+                return _made(name, ctor)
+            except Exception:
+                pass
+    legacy = getattr(cv2, "legacy", None)
+    if legacy is not None:
+        for name in ("TrackerCSRT_create", "TrackerKCF_create", "TrackerMOSSE_create"):
+            ctor = getattr(legacy, name, None)
+            if ctor is not None:
+                try:
+                    return _made("legacy." + name, ctor)
+                except Exception:
+                    pass
+    if not _tracker_type_logged:
+        _tracker_type_logged = True
+        print("[TRACKER] No OpenCV tracker available - coasting on raw Gemini boxes only.")
+    return None
+
+def _norm_to_pixel_box(norm_box, w, h):
+    """Convert a normalized [ymin, xmin, ymax, xmax] (0-1000 scale) box to pixel (x, y, w, h)."""
+    ymin, xmin, ymax, xmax = norm_box
+    ymin, ymax = min(ymin, ymax), max(ymin, ymax)
+    xmin, xmax = min(xmin, xmax), max(xmin, xmax)
+    x1 = int(xmin * w / 1000.0)
+    y1 = int(ymin * h / 1000.0)
+    x2 = int(xmax * w / 1000.0)
+    y2 = int(ymax * h / 1000.0)
+    return (x1, y1, max(1, x2 - x1), max(1, y2 - y1))
 
 # ==========================================
 # 📹 Thread 0: Background camera frame capture thread (Zero Latency)
@@ -415,74 +605,59 @@ def camera_capture_thread():
 def vision_control_thread():
     global RAW_FRAME, CURRENT_STATE, RUNNING, CAMERA_ACTIVE, LATEST_BBOX, LAST_THOUGHT, is_robot_busy, LATEST_JPEG_BYTES
     
-    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml' if hasattr(cv2, 'data') else 'haarcascade_frontalface_default.xml'
-    if not os.path.exists(cascade_path):
-        cascade_path = 'haarcascade_frontalface_default.xml'
-    face_cascade = cv2.CascadeClassifier(cascade_path)
-    
     tick = 0
     search_state_counter = 0
     owner_was_present = False
-    faces_cache = []
-    
-    # State tracking variables for gazing and evading sequences
-    gaze_ticks = 0
-    ignore_face_ticks = 0
+
     evade_ticks = 0
     evade_dir = None
     following_lost_ticks = 0
-    
+
+    # Perception: Gemini Robotics-ER is the authority on the owner box; a local visual
+    # tracker follows it smoothly between the ~1.5s Gemini verdicts.
+    owner_track_box = None            # (x, y, w, h) current owner box in pixel coords, or None
+    tracker = None                    # local OpenCV tracker following the owner between verdicts
+    gemini_lost_count = 0             # consecutive Gemini "no owner" verdicts
+    last_bbox_seq = -1                # last Gemini verdict sequence consumed
+
+    # Alignment anti-chatter: remember the last steering turn so it cannot reverse
+    # direction faster than TURN_REVERSE_DWELL_S (on-off motors flip-flop otherwise).
+    last_turn_dir = None
+    last_turn_time = 0.0
+
+    # Line-detect feedback state (board reflex cooperation + odometry anchoring)
+    line_last_high = 0.0              # last time the line signal was seen HIGH
+
+    # Sighting hold: freeze-and-stare window after a stale person sighting (see SIGHTING_HOLD_S)
+    sighting_hold_until = 0.0
+
     while RUNNING:
         # Update odometry coordinates on every 30 FPS tick to maintain smooth and up-to-date coordinate readings
         robot.update_odometry()
 
         tick += 1
-        faces = []
         sim_bbox = None
         frame = None
-        
+
         if CAMERA_ACTIVE:
             with camera_lock:
                 if LATEST_CAMERA_FRAME is not None:
                     frame = LATEST_CAMERA_FRAME.copy()
-            
+
             if frame is None:
                 time.sleep(0.01)
                 continue
-                
+
             # [LIVE STREAM SAFETY] Immediately feed the raw camera frame so web streaming never freezes on early loop exits
             with frame_lock:
                 RAW_FRAME = frame
-                
-            # Detecting on every frame wastes massive CPU cycles and causes latency.
-            # Detect once every FACE_DETECT_INTERVAL frames to keep CPU load near zero.
-            if tick % FACE_DETECT_INTERVAL == 0:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                if not face_cascade.empty():
-                    # Resize the 640x480 image to 0.5x to minimize calculations (face detection at 320x240).
-                    small_gray = cv2.resize(gray, (320, 240), interpolation=cv2.INTER_NEAREST)
-                    # Use smaller scaleFactor and minNeighbors to highly increase face detection sensitivity
-                    # for people wearing glasses, as glasses frames can disrupt Haar-like eye/nose bridge patterns.
-                    small_faces = face_cascade.detectMultiScale(
-                        small_gray, 
-                        scaleFactor=FACE_DETECT_SCALE_FACTOR, 
-                        minNeighbors=FACE_DETECT_MIN_NEIGHBORS, 
-                        minSize=FACE_DETECT_MIN_SIZE
-                    )
-                    faces_cache = []
-                    for (sf_x, sf_y, sf_w, sf_h) in small_faces:
-                        faces_cache.append((sf_x * 2, sf_y * 2, sf_w * 2, sf_h * 2))
-            faces = faces_cache
         else:
-            frame, mock_face_box, sim_bbox = create_simulated_frame(tick)
-            # Update the Cortex BBOX for 90 frames in simulation to mimic the tracking behavior
-            if tick % 120 < 90:
-                LATEST_BBOX = sim_bbox
-                faces = [mock_face_box]
-            else:
-                LATEST_BBOX = None
-                faces = []
-            
+            # Camera unavailable: the simulated frame provides a moving mock target box.
+            frame, _mock_face_box, sim_bbox = create_simulated_frame(tick)
+            # Periodically hide the mock target to exercise the loss / return-home behavior.
+            if tick % 120 >= 90:
+                sim_bbox = None
+
         # Dynamically capture actual frame dimensions (safest)
         h, w = frame.shape[:2]
         
@@ -503,29 +678,58 @@ def vision_control_thread():
             continue
         # ── [/ODO-SAFETY] ──
 
-        # 0. TABLE BOUNDARY SOFT SAFETY OVERRIDE
-        if robot.is_out_of_bounds:
-            robot.abort_event.set()  # Preempt any in-progress emotional expression; safety takes priority
-            rad = math.radians(robot.theta)
-            # Calculate cross product to determine whether center (0,0) is to robot's left or right
-            cross_product = robot.x * math.sin(rad) - robot.y * math.cos(rad)
-            if cross_product > 0:
-                robot.turn_left()
-                LAST_THOUGHT = f"[Boundary Alert] Table edge detected! Steering left to recover center... (X={robot.x:.1f}, Y={robot.y:.1f})"
-            else:
-                robot.turn_right()
-                LAST_THOUGHT = f"[Boundary Alert] Table edge detected! Steering right to recover center... (X={robot.x:.1f}, Y={robot.y:.1f})"
+        # 0-a. BOARD LINE-REFLEX COOPERATION (hardware boundary sensor - highest fidelity)
+        # While the Roborobo board reports its black-marker reflex (BCM 24 HIGH), the
+        # board owns the motors: we release all our pins (stop = High-Z) so its backup
+        # maneuver runs unopposed, kill any voice burst/expression, and ANCHOR odometry
+        # to the marker line (an absolute position fact). A short hold after the signal
+        # drops prevents instantly driving back into the line.
+        if robot.line_signal_active():
+            if time.time() - line_last_high > LINE_EVENT_GAP_S:
+                # New event (debounced against the observed millisecond re-trigger gaps)
+                robot.abort_event.set()
+                anchored = robot.anchor_to_boundary_line()
+                print(f"[LINE] Boundary marker hit: yielding to board reflex "
+                      f"({'odometry anchored' if anchored else 'uncertainty capped'}).")
+            line_last_high = time.time()
+            robot.stop()
+            LAST_THOUGHT = "[Line Sensor] Boundary marker! Backing away (board reflex)..."
+            with frame_lock:
+                RAW_FRAME = frame
+            time.sleep(VISION_LOOP_INTERVAL)
+            continue
+        elif time.time() - line_last_high < LINE_YIELD_HOLD_S:
+            robot.stop()
+            LAST_THOUGHT = "[Line Sensor] Reflex finished. Settling before resuming..."
             with frame_lock:
                 RAW_FRAME = frame
             time.sleep(VISION_LOOP_INTERVAL)
             continue
 
-        if ignore_face_ticks > 0:
-            ignore_face_ticks -= 1
-            if len(faces) > 0:
-                # Draw ignored strangers in grey to visually show they are skipped
-                for (fx, fy, fw, fh) in faces:
-                    draw_google_style_box(frame, f"stranger ignored ({ignore_face_ticks // 30 + 1}s)", fx, fy, fw, fh, (130, 135, 140))
+        # 0. TABLE BOUNDARY SOFT SAFETY OVERRIDE
+        # Same controller as return-home: turn toward the table center within a heading
+        # DEADBAND, then DRIVE back inside. (The old sign-only left/right rule had no
+        # deadband and no forward step: once the robot happened to face the center the
+        # sign flipped every frame, chattering left/right forever while never actually
+        # re-entering the safe area. is_safe_action explicitly allows forward moves
+        # that reduce the boundary violation, so driving in is safe.)
+        if robot.is_out_of_bounds:
+            robot.abort_event.set()  # Preempt any in-progress emotional expression; safety takes priority
+            desired = math.degrees(math.atan2(-robot.y, -robot.x))
+            err = ((desired - robot.theta + 180) % 360) - 180
+            if err > HOME_HEADING_TOLERANCE:
+                robot.turn_left()
+                LAST_THOUGHT = f"[Boundary Alert] Table edge! Turning toward center... (X={robot.x:.1f}, Y={robot.y:.1f})"
+            elif err < -HOME_HEADING_TOLERANCE:
+                robot.turn_right()
+                LAST_THOUGHT = f"[Boundary Alert] Table edge! Turning toward center... (X={robot.x:.1f}, Y={robot.y:.1f})"
+            else:
+                robot.move_forward()
+                LAST_THOUGHT = f"[Boundary Alert] Driving back toward table center... (X={robot.x:.1f}, Y={robot.y:.1f})"
+            with frame_lock:
+                RAW_FRAME = frame
+            time.sleep(VISION_LOOP_INTERVAL)
+            continue
 
         # 1. EMERGENCY EVADING STATE (Escape Maneuver when too close)
         if CURRENT_STATE == "EVADING":
@@ -557,105 +761,183 @@ def vision_control_thread():
 
         target_center_x = None
         target_box = None
-        
-        # Determine the primary active visual target bounding box
-        temp_target_box = None
-        if LATEST_BBOX:
-            ymin, xmin, ymax, xmax = LATEST_BBOX
-            # Ensure correct coordinate order (ascending) to prevent negative dimensions
-            ymin, ymax = min(ymin, ymax), max(ymin, ymax)
-            xmin, xmax = min(xmin, xmax), max(xmin, xmax)
-            g_x1 = int(xmin * w / 1000.0)
-            g_y1 = int(ymin * h / 1000.0)
-            g_x2 = int(xmax * w / 1000.0)
-            g_y2 = int(ymax * h / 1000.0)
-            temp_target_box = (g_x1, g_y1, g_x2 - g_x1, g_y2 - g_y1)
-        elif len(faces) > 0 and ignore_face_ticks <= 0:
-            sorted_faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
-            temp_target_box = sorted_faces[0]
+        # Voice-command hold: autonomous driving stays paused for a while after a voice
+        # command so its result is not instantly overridden by tracking (VOICE > autonomy).
+        autonomy_held = time.time() < autonomy_hold_until
 
-        # Check for extreme closeness to trigger Evasion (safety escape)
-        if temp_target_box is not None:
-            tx, ty, tw, th_box = temp_target_box
-            box_height_ratio = th_box / h
-            if box_height_ratio > EMERGENCY_EVADE_THRESHOLD:
+        # ==========================================================
+        # PERCEPTION: Gemini Robotics-ER = authority on the owner; local tracker = bridge
+        # Gemini localizes the owner every ~1.5s and (re)anchors the tracker; the tracker
+        # follows that SAME target every frame in between. New people cannot steal the lock
+        # (the tracker follows the original); only a Gemini re-anchor changes the target.
+        # ==========================================================
+        visible = False   # is a valid owner box available THIS frame?
+
+        if not CAMERA_ACTIVE:
+            # Simulation: use the mock box directly as the owner box.
+            owner_track_box = _norm_to_pixel_box(sim_bbox, w, h) if sim_bbox is not None else None
+            visible = owner_track_box is not None
+            tracker = None
+        else:
+            # (a) A fresh Gemini verdict re-anchors the owner and (re)initializes the tracker.
+            with state_lock:
+                cur_seq = LATEST_BBOX_SEQ
+                cur_bbox = tuple(LATEST_BBOX) if LATEST_BBOX else None
+                cur_pose = LATEST_BBOX_POSE
+            anchored = False
+            if cur_seq != last_bbox_seq:
+                last_bbox_seq = cur_seq
+                if cur_bbox:
+                    gemini_lost_count = 0
+                    # STALE-ANCHOR GUARD: only anchor if the robot has NOT turned/moved
+                    # since the verdict's frame was captured (else the coordinates point
+                    # at the wrong place and the tracker would latch onto background).
+                    pose_fresh = True
+                    if cur_pose is not None:
+                        d_theta = abs(((robot.theta - cur_pose[0]) + 180.0) % 360.0 - 180.0)
+                        d_move = math.hypot(robot.x - cur_pose[1], robot.y - cur_pose[2])
+                        pose_fresh = d_theta <= ANCHOR_MAX_TURN_DEG and d_move <= ANCHOR_MAX_MOVE_MM
+                    if pose_fresh:
+                        owner_track_box = _norm_to_pixel_box(cur_bbox, w, h)
+                        following_lost_ticks = 0
+                        visible = True
+                        anchored = True
+                        # Tracker init only on SANE boxes: huge body-fusion boxes that
+                        # span nearly the whole frame give the tracker nothing
+                        # distinctive to lock onto. Without a tracker we simply coast on
+                        # the Gemini box until the next fresh verdict re-centers it.
+                        bx, by, bw, bh = owner_track_box
+                        if bw < 0.85 * w and bh < 0.9 * h:
+                            tracker = _create_tracker()
+                            if tracker is not None:
+                                try:
+                                    ts = TRACKER_DOWNSCALE
+                                    small = cv2.resize(frame, (int(w * ts), int(h * ts))) if ts != 1.0 else frame
+                                    tracker.init(small, (int(bx * ts), int(by * ts), max(1, int(bw * ts)), max(1, int(bh * ts))))
+                                except Exception:
+                                    tracker = None
+                        else:
+                            tracker = None
+                    else:
+                        # Stale coordinates, but the SIGHTING itself is real: someone is
+                        # nearby. If we have no lock yet, freeze and stare - the next
+                        # verdict (triggered right now) will be captured while we are
+                        # stationary and can anchor. Existing tracks stay untouched.
+                        if owner_track_box is None:
+                            sighting_hold_until = time.time() + SIGHTING_HOLD_S
+                            gemini_trigger_event.set()
+                            print("[VISION] Person sighted while moving: freezing for a steady look...")
+                else:
+                    gemini_lost_count += 1
+                    if gemini_lost_count >= GEMINI_LOST_VERDICTS:
+                        owner_track_box = None      # Gemini repeatedly finds no owner -> release
+                        tracker = None
+                        gemini_lost_count = 0
+                        following_lost_ticks = 0
+                        with state_lock:
+                            CURRENT_STATE = "RETURNING" if RETURN_HOME_ON_LOSS else "SEARCHING"
+
+            # (b) Between verdicts, follow the owner smoothly with the local tracker.
+            if owner_track_box is not None and not anchored:
+                if tracker is not None:
+                    if tick % TRACKER_UPDATE_EVERY == 0:
+                        try:
+                            ts = TRACKER_DOWNSCALE
+                            small = cv2.resize(frame, (int(w * ts), int(h * ts))) if ts != 1.0 else frame
+                            ok, tbox = tracker.update(small)
+                        except Exception:
+                            ok, tbox = False, None
+                        if ok and tbox is not None:
+                            inv = 1.0 / TRACKER_DOWNSCALE
+                            x, y, bw, bh = (int(v * inv) for v in tbox)
+                            if bw > 0 and bh > 0:
+                                owner_track_box = (x, y, bw, bh)
+                                visible = True
+                        # else: tracker lost this frame -> not visible (holding/grace handles it)
+                    else:
+                        visible = True              # skipped update tick: keep last box
+                else:
+                    visible = True                  # no tracker available: coast on last Gemini box
+
+        # Emergency evade when the owner is right in front (only when actually visible).
+        if owner_track_box is not None and visible:
+            th_box = owner_track_box[3]
+            if th_box / h > EMERGENCY_EVADE_THRESHOLD:
                 robot.abort_event.set()  # Preempt emotional expression before emergency evade
                 with state_lock:
                     CURRENT_STATE = "EVADING"
                 evade_ticks = 0
                 evade_dir = random.choice(['left', 'right'])
                 robot.stop()
-                LAST_THOUGHT = f"Whoa, target is too close (height ratio: {box_height_ratio:.2f})! Initiating emergency back up and random turn."
+                LAST_THOUGHT = f"Whoa, target is too close (height ratio: {th_box / h:.2f})! Backing up and turning."
                 with frame_lock:
                     RAW_FRAME = frame
                 time.sleep(VISION_LOOP_INTERVAL)
                 continue
 
-        # 3. SEARCHING STATE Transition to FOLLOWING (Immediate Local Face Lock-On)
-        if CURRENT_STATE == "SEARCHING" and len(faces) > 0 and ignore_face_ticks <= 0:
-            with state_lock:
-                CURRENT_STATE = "FOLLOWING"
+        # Derive the motor target, or hold + fidget when the owner is momentarily out of view.
+        if owner_track_box is not None:
+            tx, ty, tw, th_box = owner_track_box
+            if visible:
                 following_lost_ticks = 0
-                LATEST_BBOX = None # Clear stale cortex bounding box to ensure fresh Gemini check
-                gaze_start_time = time.time()
-                gemini_trigger_event.set() # Trigger immediate Gemini API request
-            robot.stop()
-            LAST_THOUGHT = "Face spotted! Initiating immediate active tracking..."
-            with frame_lock:
-                RAW_FRAME = frame
-            time.sleep(VISION_LOOP_INTERVAL)
-            continue
-
-        # 4. Standard FOLLOWING / TRACKING State Logic
-        if LATEST_BBOX:
-            ymin, xmin, ymax, xmax = LATEST_BBOX
-            # Ensure correct coordinate order (ascending) to prevent negative dimensions
-            ymin, ymax = min(ymin, ymax), max(ymin, ymax)
-            xmin, xmax = min(xmin, xmax), max(xmin, xmax)
-            g_x1 = int(xmin * w / 1000.0)
-            g_y1 = int(ymin * h / 1000.0)
-            g_x2 = int(xmax * w / 1000.0)
-            g_y2 = int(ymax * h / 1000.0)
-            is_face_target = any(kw in OWNER_DESCRIPTION.lower() for kw in ["person", "man", "woman", "owner", "face", "glasses", "human"])
-            
-            matched_face = None
-            if is_face_target and len(faces) > 0:
-                min_dist = float('inf')
-                gemini_cx = (g_x1 + g_x2) / 2
-                gemini_cy = (g_y1 + g_y2) / 2
-                for (fx, fy, fw, fh) in faces:
-                    fcx = fx + (fw // 2)
-                    fcy = fy + (fh // 2)
-                    dist = np.sqrt((fcx - gemini_cx)**2 + (fcy - gemini_cy)**2)
-                    if dist < min_dist:
-                        min_dist = dist
-                        matched_face = (fx, fy, fw, fh)
-            
-            if matched_face:
-                fx, fy, fw, fh = matched_face
-                target_center_x = fx + (fw // 2)
-                target_box = (fx, fy, fw, fh)
-                draw_google_style_box(frame, "owner (active - lock-on)", fx, fy, fw, fh, COLOR_CYAN)
+                target_center_x = tx + tw // 2
+                target_box = owner_track_box
+                # On-screen annotation is handled solely by the dashboard's HTML/CSS
+                # vector overlay (DASHBOARD_OBJECTS); nothing is burned into the frame.
             else:
-                target_center_x = (g_x1 + g_x2) // 2
-                target_box = (g_x1, g_y1, g_x2 - g_x1, g_y2 - g_y1)
-                draw_google_style_box(frame, "owner (cortex - tracking)", g_x1, g_y1, g_x2 - g_x1, g_y2 - g_y1, COLOR_CYAN)
-        
-        elif len(faces) > 0 and ignore_face_ticks <= 0 and any(kw in OWNER_DESCRIPTION.lower() for kw in ["person", "man", "woman", "owner", "face", "glasses", "human"]):
-            faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
-            fx, fy, fw, fh = faces[0]
-            target_center_x = fx + (fw // 2)
-            target_box = (fx, fy, fw, fh)
-            draw_google_style_box(frame, "owner (reflex - local)", fx, fy, fw, fh, (130, 135, 140))
-            
+                following_lost_ticks += 1
+                if following_lost_ticks >= FOLLOWING_LOST_GRACE_TICKS:
+                    # Owner gone for good -> release; fall through to return-home / search.
+                    owner_track_box = None
+                    tracker = None
+                    following_lost_ticks = 0
+                    with state_lock:
+                        CURRENT_STATE = "RETURNING" if RETURN_HOME_ON_LOSS else "SEARCHING"
+                else:
+                    # Momentarily out of view. For BRIEF dropouts (a frame or two of
+                    # tracker miss) leave the motors exactly as they are - reacting on
+                    # every miss made following and fidgeting fight at frame rate,
+                    # churning left/right pulses while the robot visibly stood still.
+                    # Only after a sustained miss start the restless-pet fidget.
+                    # Motors belong to a voice command / expression while is_robot_busy,
+                    # and stay paused during a post-command hold (VOICE outranks fidgeting).
+                    if (following_lost_ticks >= FIDGET_START_TICKS
+                            and not is_robot_busy and not autonomy_held):
+                        fidget = _restless_action(following_lost_ticks)
+                        if fidget == "turn_left":
+                            robot.turn_left()
+                        elif fidget == "turn_right":
+                            robot.turn_right()
+                        elif fidget == "move_forward":
+                            # Boundary-vetoed fidget steps degrade to a quiet stop
+                            # instead of hammering blocked-move warnings.
+                            if robot.is_safe_action('forward'):
+                                robot.move_forward()
+                            else:
+                                robot.stop()
+                        elif fidget == "move_backward":
+                            if robot.is_safe_action('backward'):
+                                robot.move_backward()
+                            else:
+                                robot.stop()
+                        else:
+                            robot.stop()
+                        LAST_THOUGHT = f"Where did my owner go? Fidgeting and looking around... ({following_lost_ticks}/{FOLLOWING_LOST_GRACE_TICKS})"
+                    with frame_lock:
+                        RAW_FRAME = frame
+                    time.sleep(VISION_LOOP_INTERVAL)
+                    continue
+
         # Real-time motor command determination and transmission
         if target_center_x is not None:
-            following_lost_ticks = 0 # Reset target-loss hysteresis
+            # (loss hysteresis is managed by the owner track-ID logic above)
             with state_lock:
                 was_dozing = (CURRENT_STATE == "DOZING")
                 CURRENT_STATE = "FOLLOWING"
             
-            if was_dozing or not owner_was_present:
+            # Joy expression only when the motors are free: a running voice command or
+            # post-command hold outranks it (re-fires on a later frame once released).
+            if (was_dozing or not owner_was_present) and not is_robot_busy and not autonomy_held:
                 print("[VISION] Target newly spotted! Transitioning to active tracking and expressing joy.")
                 owner_was_present = True
                 search_state_counter = 0
@@ -677,23 +959,41 @@ def vision_control_thread():
                 time.sleep(VISION_LOOP_INTERVAL)
                 continue
                 
-            if not is_robot_busy and target_box is not None:
+            if not is_robot_busy and autonomy_held:
+                # Voice hold: keep tracking visually but do not drive.
+                robot.stop()
+                LAST_THOUGHT = f"[Voice] Holding position as commanded ({autonomy_hold_until - time.time():.0f}s)..."
+            elif not is_robot_busy and target_box is not None:
                 bx, by, bw, bh = target_box
                 box_height_ratio = bh / h
                 
-                if target_center_x < w * ALIGN_LEFT_THRESHOLD:
-                    robot.turn_left()
-                    LAST_THOUGHT = f"Tracking target on the left (dist ratio: {box_height_ratio:.2f}). Steering left."
+                if box_height_ratio > DISTANCE_CLOSE_THRESHOLD:
+                    # [SAFETY SPACE RECOVERY] If the object/owner is too close, prioritize backing up 
+                    # regardless of left/right deviation to prevent sweep collisions during turns.
+                    robot.move_backward()
+                    LAST_THOUGHT = f"Target is too close (height ratio: {box_height_ratio:.2f}). Stopping and backing up a little..."
+                elif target_center_x < w * ALIGN_LEFT_THRESHOLD:
+                    # Anti-chatter: do not reverse an opposite turn issued a moment ago.
+                    if last_turn_dir != 'right' or time.time() - last_turn_time >= TURN_REVERSE_DWELL_S:
+                        robot.turn_left()
+                        last_turn_dir, last_turn_time = 'left', time.time()
+                        LAST_THOUGHT = f"Tracking target on the left (dist ratio: {box_height_ratio:.2f}). Steering left."
                 elif target_center_x > w * ALIGN_RIGHT_THRESHOLD:
-                    robot.turn_right()
-                    LAST_THOUGHT = f"Tracking target on the right (dist ratio: {box_height_ratio:.2f}). Steering right."
+                    if last_turn_dir != 'left' or time.time() - last_turn_time >= TURN_REVERSE_DWELL_S:
+                        robot.turn_right()
+                        last_turn_dir, last_turn_time = 'right', time.time()
+                        LAST_THOUGHT = f"Tracking target on the right (dist ratio: {box_height_ratio:.2f}). Steering right."
                 else:
                     if box_height_ratio < DISTANCE_FAR_THRESHOLD:
-                        robot.move_forward()
-                        LAST_THOUGHT = f"Target centered but far away (dist ratio: {box_height_ratio:.2f}). Approaching."
-                    elif box_height_ratio > DISTANCE_CLOSE_THRESHOLD:
-                        robot.move_backward()
-                        LAST_THOUGHT = f"Target centered but too close (dist ratio: {box_height_ratio:.2f}). Backing up."
+                        # Approaching may be vetoed by the table boundary (owner standing
+                        # beyond the edge). Check first instead of ramming move_forward()
+                        # every frame, which spams blocked-warnings and looks stuck.
+                        if robot.is_safe_action('forward'):
+                            robot.move_forward()
+                            LAST_THOUGHT = f"Target centered but far away (dist ratio: {box_height_ratio:.2f}). Approaching."
+                        else:
+                            robot.stop()
+                            LAST_THOUGHT = "Owner is beyond my table edge. Waiting here at the boundary."
                     else:
                         robot.stop()
                         LAST_THOUGHT = f"Target centered at comfortable distance (dist ratio: {box_height_ratio:.2f}). Staying."
@@ -703,17 +1003,65 @@ def vision_control_thread():
             if CURRENT_STATE == "FOLLOWING":
                 following_lost_ticks += 1
                 if following_lost_ticks < FOLLOWING_LOST_GRACE_TICKS:
-                    robot.stop()
-                    LAST_THOUGHT = f"Target temporarily lost. Waiting for reappearance... ({following_lost_ticks}/{FOLLOWING_LOST_GRACE_TICKS})"
+                    if not is_robot_busy:  # do not stomp a running voice command
+                        robot.stop()
+                        LAST_THOUGHT = f"Target temporarily lost. Waiting for reappearance... ({following_lost_ticks}/{FOLLOWING_LOST_GRACE_TICKS})"
                     with frame_lock:
                         RAW_FRAME = frame
                     time.sleep(VISION_LOOP_INTERVAL)
                     continue
                 else:
                     following_lost_ticks = 0
-            
+
+            # Voice hold: no autonomous return-home / scanning while a commanded
+            # position is being held (safety overrides above still apply).
+            if autonomy_held and not is_robot_busy:
+                robot.stop()
+                LAST_THOUGHT = f"[Voice] Holding position as commanded ({autonomy_hold_until - time.time():.0f}s)..."
+                with frame_lock:
+                    RAW_FRAME = frame
+                time.sleep(VISION_LOOP_INTERVAL)
+                continue
+
+            # Sighting hold: a stale verdict saw a person - freeze and stare so the
+            # re-triggered verdict is captured while stationary and can lock on.
+            if time.time() < sighting_hold_until and not is_robot_busy:
+                robot.stop()
+                LAST_THOUGHT = "I think I saw someone! Holding still to get a good look..."
+                with frame_lock:
+                    RAW_FRAME = frame
+                time.sleep(VISION_LOOP_INTERVAL)
+                continue
+
+            # Owner lost: drive back to the home base (0, 0) before resuming the scan.
+            if CURRENT_STATE == "RETURNING" and not is_robot_busy:
+                owner_was_present = False
+                home_dist = math.hypot(robot.x, robot.y)
+                if home_dist <= HOME_POSITION_TOLERANCE:
+                    robot.stop()
+                    with state_lock:
+                        CURRENT_STATE = "SEARCHING"
+                    search_state_counter = 0
+                    LAST_THOUGHT = "Back at home base. Watching for my owner again."
+                else:
+                    desired = math.degrees(math.atan2(-robot.y, -robot.x))
+                    err = ((desired - robot.theta + 180) % 360) - 180
+                    if err > HOME_HEADING_TOLERANCE:
+                        robot.turn_left()
+                        LAST_THOUGHT = f"Lost my owner. Turning toward home base... (dist {home_dist:.0f} mm)"
+                    elif err < -HOME_HEADING_TOLERANCE:
+                        robot.turn_right()
+                        LAST_THOUGHT = f"Lost my owner. Turning toward home base... (dist {home_dist:.0f} mm)"
+                    else:
+                        robot.move_forward()
+                        LAST_THOUGHT = f"Lost my owner. Returning to home base... (dist {home_dist:.0f} mm)"
+                with frame_lock:
+                    RAW_FRAME = frame
+                time.sleep(VISION_LOOP_INTERVAL)
+                continue
+
             owner_was_present = False
-            
+
             if not is_robot_busy:
                 search_state_counter += 1
                 
@@ -726,199 +1074,630 @@ def vision_control_thread():
                 else:
                     with state_lock:
                         CURRENT_STATE = "SEARCHING"
-                    cycle_tick = search_state_counter % 360
-                    
-                    if cycle_tick < 50:
-                        robot.turn_left()
-                        LAST_THOUGHT = "Slightly tilting left, scanning the environment..."
-                    elif cycle_tick < 100:
-                        robot.turn_right()
-                        LAST_THOUGHT = "Curiously panning right, searching for movement..."
-                    elif cycle_tick < 140:
-                        robot.stop()
-                        LAST_THOUGHT = "Standing alertly, sniffing the air for your scent..."
-                    elif cycle_tick < 150:
-                        robot.move_forward()
-                        LAST_THOUGHT = "Taking an extremely tiny step forward to explore..."
-                    elif cycle_tick < 190:
-                        robot.stop()
-                        LAST_THOUGHT = "Pausing and listening..."
-                    elif cycle_tick < 230:
-                        robot.turn_left()
-                        LAST_THOUGHT = "Shuffling left to check my blind spot..."
-                    elif cycle_tick < 240:
-                        # [ODO-SAFETY] Avoid blind reverse during search (no rear sensor, large drift);
-                        # hold position instead of micro-stepping backward.
-                        robot.stop()
-                        LAST_THOUGHT = "Holding position, staying safely centered..."
-                    elif cycle_tick < 270:
-                        robot.stop()
-                        LAST_THOUGHT = "Staying centered and safe on the table..."
-                    elif cycle_tick < 320:
-                        robot.turn_right()
-                        LAST_THOUGHT = "Looking right again... Did I hear something?"
+                    # STOP-AND-SCAN search, matched to the Gemini verdict cadence: short
+                    # ~40 deg sweep, then a ~2s PAUSE. The stale-anchor guard only
+                    # accepts verdicts captured while the camera was steady, so these
+                    # pauses are what actually produce lock-ons. (Continuous sweeping
+                    # never yields a fresh anchor and the robot could not lock on.)
+                    seg = (search_state_counter // 114) % 6
+                    t_in = search_state_counter % 114
+                    sweeping = t_in < 54            # 54 ticks ~= 1.8s ~= 40 deg at 22.5 deg/s
+                    if seg <= 2:
+                        if sweeping:
+                            robot.turn_left()
+                            LAST_THOUGHT = "Scanning left in short steps..."
+                        else:
+                            robot.stop()
+                            LAST_THOUGHT = "Holding still so my cloud brain gets a steady look..."
+                    elif seg == 3:
+                        if t_in < 30:
+                            robot.move_forward()
+                            LAST_THOUGHT = "Roaming forward to explore for my owner..."
+                        else:
+                            robot.stop()
+                            LAST_THOUGHT = "Pausing and watching..."
                     else:
-                        robot.stop()
-                        LAST_THOUGHT = "Taking a quiet breath, waiting patiently..."
+                        if sweeping:
+                            robot.turn_right()
+                            LAST_THOUGHT = "Scanning right in short steps..."
+                        else:
+                            robot.stop()
+                            LAST_THOUGHT = "Holding still so my cloud brain gets a steady look..."
                     
         # ----------------------------------
         # 📐 Google Robotics-ER 1.6 multi-object rendering (stale pointer prevention and timeout filter)
         # ----------------------------------
-        # When wheels are moving or the camera is panning, 2D screen coordinate synchronization drifts.
-        # To completely prevent stale dots from floating during motion, we only render object pointer
-        # labels when the robot is stopped (last action is 'stop' or None) and the camera is steady.
-        # Also, cache data older than a timeout without a Gemini update is automatically expired/hidden.
+        # Object annotations are rendered ONLY by the dashboard's HTML/CSS vector overlay
+        # (via DASHBOARD_OBJECTS below) - nothing is burned into the video frames. The
+        # is_moving / staleness gates still control WHEN overlay data is published, so
+        # stale pointers do not float across the screen while the robot is driving.
         is_moving = (robot.last_action not in ['stop', None])
-        
+
         with state_lock:
             current_detected_objects = list(DETECTED_OBJECTS)
             last_det_time = LAST_DETECTION_TIME
+
+        # 📐 Compute normalized coordinates for high-fidelity HTML/CSS vector overlays
+        global DASHBOARD_OBJECTS
+        temp_dash_objects = []
+        
+        # 1. Active tracked target
+        active_box = target_box if target_box is not None else owner_track_box
+        if active_box is not None:
+            ax, ay, aw, ah_box = active_box
+            # Normalize to 0-1000 scale
+            a_ymin = int(ay * 1000 / h)
+            a_xmin = int(ax * 1000 / w)
+            a_ymax = int((ay + ah_box) * 1000 / h)
+            a_xmax = int((ax + aw) * 1000 / w)
             
+            # HUD honesty: only call it "Active" when the owner is actually seen THIS
+            # frame (target_box set). A remembered-but-unseen track (holding/coasting)
+            # shows as a dimmer "Last Seen" pointer without the cyan lock box.
+            if target_box is not None:
+                lbl, box_type = "Owner (Active)", "active"
+            else:
+                lbl, box_type = "Owner (Last Seen)", "holding"
+            temp_dash_objects.append({
+                "label": lbl,
+                "box_2d": [a_ymin, a_xmin, a_ymax, a_xmax],
+                "type": box_type
+            })
+            
+        # 2. Secondary detected objects
         if not is_moving and (time.time() - last_det_time < OBJECT_STALE_TIMEOUT):
             for obj in current_detected_objects:
                 box = obj.get("box_2d")
                 label = obj.get("label", "object")
                 if box and len(box) == 4:
                     oymin, oxmin, oymax, oxmax = box
-                    # Target owner is already clearly highlighted above, so only draw non-owner objects on the HUD
-                    if label.lower() not in OWNER_DESCRIPTION.lower():
-                        draw_google_robotics_pointer(frame, label, oxmin, oymin, oxmax, oymax)
+                    if label.lower() not in OWNER_DESCRIPTION.lower() and label.lower() not in ["owner", "face", "person"]:
+                        temp_dash_objects.append({
+                            "label": label.title(),
+                            "box_2d": [oymin, oxmin, oymax, oxmax],
+                            "type": "cortex"
+                        })
                         
+        with state_lock:
+            DASHBOARD_OBJECTS = temp_dash_objects
+            
         with frame_lock:
             RAW_FRAME = frame
         time.sleep(VISION_LOOP_INTERVAL) # Approx 30fps loop
 
 # ==========================================
-# 🎙️ Thread 2: SpeechRecognition Voice Recognition Thread (Auditory)
+# Thread 2: Voice Command Thread (Auditory) - local VAD + Gemini audio recognition
 # ==========================================
-def audio_recognition_thread():
-    global RUNNING, LAST_THOUGHT, is_robot_busy
-    
-    if not SPEECH_AVAILABLE:
-        print("⚠️ [AUDITORY] SpeechRecognition is unavailable. Auditory layer disabled.")
-        return
-        
-    recognizer = sr.Recognizer()
-    
-    # Dynamically find the integrated USB microphone (camera mic)
+# Audio capture + voice-activity-detection (VAD) tunables. A short spoken utterance is
+# captured locally, then sent to Gemini for command recognition.
+VOICE_SAMPLE_RATE = 16000            # preferred mic sample rate (falls back to the device native rate)
+# VAD thresholds are AUTO-CALIBRATED at startup from ~1s of ambient noise; the factors
+# below scale that ambient level, with absolute floors for very quiet rooms.
+VOICE_START_FACTOR = 3.5             # speech starts when RMS exceeds ambient * this factor
+VOICE_STOP_FACTOR = 1.8              # a chunk counts as silence when RMS falls below ambient * this
+VOICE_RMS_FLOOR_START = 300          # lower bound for the start threshold
+VOICE_RMS_FLOOR_STOP = 180           # lower bound for the end-of-speech threshold
+VOICE_RMS_START_MAX = 9000           # upper bound for the start threshold: motor noise must never push the trigger above reachable speech levels (observed speech peaks 5000-12000)
+VOICE_SILENCE_CHUNKS = 8             # consecutive quiet chunks (~64ms each) that end an utterance (~0.5s)
+VOICE_PREROLL_CHUNKS = 4             # chunks (~0.26s) kept from BEFORE the trigger so the first syllable is not clipped
+VOICE_MIN_MS = 250                   # ignore utterances shorter than this (clicks/noise)
+VOICE_MAX_MS = 2600                  # hard cap on a single utterance (commands are single short words; a low cap also cuts latency in noisy rooms where trailing silence is never detected)
+VOICE_COOLDOWN_S = 1.0               # minimum gap between accepted commands
+# After a voice command finishes, autonomous driving (following/search/fidget/return)
+# stays PAUSED so the commanded result visibly sticks instead of being instantly
+# overridden by tracking. "come" releases the hold (it means: resume following me).
+VOICE_AUTONOMY_HOLD_S = 8.0          # hold after motion commands (forward/backward/left/right/spin)
+VOICE_STAY_HOLD_S = 25.0             # hold after "stop" (stay put like a trained dog; "come" releases early)
+VOICE_GEMINI_MODEL = "gemini-2.5-flash"  # audio-capable model for the legacy capture-and-classify fallback
+
+# Gemini Live API (persistent WebSocket, server-side VAD): primary voice path.
+# gemini-3.1-flash-live-preview accepts this key but is AUDIO-response-only (a TEXT
+# session is rejected with code 1007), so we connect with AUDIO modality, enable
+# input_audio_transcription, and match the USER's Korean transcript locally with
+# _match_voice_intent. The model's (tiny) audio replies are discarded.
+# Set env VOICE_LIVE_MODEL to force a different model first.
+VOICE_LIVE_MODELS = (
+    "gemini-3.1-flash-live-preview",
+)
+VOICE_LIVE_MAX_FAILURES = 3          # consecutive connect failures before falling back to the legacy path
+
+# Korean command word(s) -> intent. Gemini returns an intent token directly; this table
+# also backs a text-fallback match on the transcript.
+VOICE_COMMANDS = [
+    (["이리와"], "come"),          # come here
+    (["멈춰", "정지"], "stop"),   # stop
+    (["돌아"], "spin"),           # spin / turn around
+    (["앞으로"], "forward"),      # forward
+    (["뒤로"], "backward"),       # backward
+    (["왼쪽으로"], "left"),       # turn left
+    (["오른쪽으로"], "right"),    # turn right
+]
+
+# Motor burst durations in seconds (each command moves briefly then auto-stops). Tune on-device.
+# CALIBRATED speeds: linear ~260 mm/s (2026-07-12), angular ~22.5 deg/s (2026-07-13:
+# a 4.0s spin rotated 90 deg). FORWARD=1.5s ~= 390 mm, COME=2.2s ~= 570 mm,
+# BACKWARD=1.2s ~= 310 mm, TURN=2.2s ~= 50 deg, SPIN=8.0s ~= 180 deg (turn around).
+CMD_BURST_COME = 2.2
+CMD_BURST_FORWARD = 1.5
+CMD_BURST_BACKWARD = 1.2
+CMD_BURST_TURN = 2.2
+CMD_BURST_SPIN = 8.0
+
+
+VOICE_INTENTS = {intent for _words, intent in VOICE_COMMANDS}  # valid intent tokens
+
+# Wake word: the robot's name. Commands must be addressed to the robot ("토토 앞으로")
+# so command words inside normal conversation never trigger motion. Emergency stop
+# ("멈춰"/"정지") is exempt and works without the wake word.
+# Includes common STT variants of the made-up name (the transcriber has no dictionary
+# entry for "토토" and often writes a sound-alike instead).
+WAKE_WORDS = ["토토", "또또", "토도", "도도", "또토", "toto"]
+
+def _match_voice_intent(text):
+    """Map recognized text to a command intent.
+    - Bare intent tokens from the legacy classifier (e.g. "forward") keep working.
+    - Korean transcripts require the WAKE WORD ("토토"); the command is matched on the
+      text AFTER the name, so natural phrasing like "토토 앞으로 가" works and command
+      words inside unrelated conversation are ignored.
+    - Safety exception: a short bare "멈춰"/"정지" stops the robot without the name.
+    Spaces are ignored throughout (STT may tokenize syllables with spaces)."""
+    if not text:
+        return None
+    norm = text.strip().lower().replace(" ", "")
+
+    # Legacy classifier path: a short bare intent token ("forward", "stop", ...).
+    if len(norm) <= 8:
+        for it in VOICE_INTENTS:
+            if it in norm:
+                return it
+        # Emergency stop works without the wake word (short, deliberate utterance only).
+        if "멈춰" in norm or "정지" in norm:
+            return "stop"
+
+    # Wake-word path: find the robot's name, then match the command in what follows.
+    # When several command words appear ("오른쪽으로 돌아" = turn right), the EARLIEST
+    # one in the phrase wins - in Korean commands the head word comes first.
+    for wake in WAKE_WORDS:
+        idx = norm.find(wake)
+        if idx != -1:
+            rest = norm[idx + len(wake):]
+            best = None  # (position, -word_length, intent): leftmost, then longest word
+            for words, intent in VOICE_COMMANDS:
+                for w in words:
+                    wn = w.replace(" ", "")
+                    p = rest.find(wn)
+                    if p != -1 and (best is None or (p, -len(wn)) < (best[0], best[1])):
+                        best = (p, -len(wn), intent)
+            return best[2] if best else None  # None: addressed to the robot, but no command followed
+    return None
+
+
+def _voice_sleep(duration):
+    """Interruptible burst sleep. Returns False (early) if the burst is preempted:
+    voice_abort_event = a newer voice command takes over; robot.abort_event = a safety
+    override (boundary / evade / re-home) has claimed the motors."""
+    end = time.time() + duration
+    while time.time() < end:
+        if voice_abort_event.is_set() or robot.abort_event.is_set():
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _run_voice_action(intent):
+    """Execute one voice command as a short motor burst, interlocked via is_robot_busy.
+    Priority: SAFETY > VOICE > autonomous behaviors. The burst yields immediately to
+    safety overrides and to a newer voice command (see _voice_sleep)."""
+    global is_robot_busy, LAST_THOUGHT, current_voice_intent, autonomy_hold_until
+    with state_lock:
+        is_robot_busy = True
+        current_voice_intent = intent
+    robot.abort_event.clear()  # meaningful within this action: set again only by safety (or preemption)
     try:
-        with ignore_stderr():
-            mic_names = sr.Microphone.list_microphone_names()
-        print(f"[AUDITORY] Available microphone names: {mic_names}")
-        target_idx = None
-        for idx, name in enumerate(mic_names):
-            name_lower = name.lower()
-            if any(k in name_lower for k in ["usb", "camera", "webcam"]):
-                target_idx = idx
-                print(f"🎤 [AUDITORY] Selected USB/Camera microphone: '{name}' (Index {idx})")
-                break
-        
-        # Fallback to other microphones if USB/Camera not found
-        if target_idx is None:
-            for idx, name in enumerate(mic_names):
-                name_lower = name.lower()
-                if any(k in name_lower for k in ["mic", "input", "capture"]):
-                    target_idx = idx
-                    print(f"🎤 [AUDITORY] Selected fallback microphone: '{name}' (Index {idx})")
-                    break
-                    
-        if target_idx is not None:
-            with ignore_stderr():
-                mic = sr.Microphone(device_index=target_idx)
-        else:
-            with ignore_stderr():
-                mic = sr.Microphone()
-            print("⚠️ [AUDITORY] No USB/Camera microphone found. Using default microphone.")
-    except Exception as e:
-        with ignore_stderr():
-            mic = sr.Microphone()
-        print(f"⚠️ [AUDITORY] Error listing microphones ({e}). Using default microphone.")
-    
-    print("✅ [AUDITORY] SpeechRecognition thread started.")
-    
+        if intent == "stop":
+            robot.stop()
+            LAST_THOUGHT = "[Voice] Stop. Holding still."
+            _voice_sleep(0.8)
+        elif intent == "come":
+            LAST_THOUGHT = "[Voice] Coming! Resuming owner tracking."
+            gemini_trigger_event.set()  # fresh owner fix so following approaches the right spot
+            robot.move_forward(); _voice_sleep(CMD_BURST_COME)
+        elif intent == "forward":
+            LAST_THOUGHT = "[Voice] Moving forward."
+            robot.move_forward(); _voice_sleep(CMD_BURST_FORWARD)
+        elif intent == "backward":
+            LAST_THOUGHT = "[Voice] Moving backward."
+            robot.move_backward(); _voice_sleep(CMD_BURST_BACKWARD)
+        elif intent == "left":
+            LAST_THOUGHT = "[Voice] Turning left."
+            robot.turn_left(); _voice_sleep(CMD_BURST_TURN)
+        elif intent == "right":
+            LAST_THOUGHT = "[Voice] Turning right."
+            robot.turn_right(); _voice_sleep(CMD_BURST_TURN)
+        elif intent == "spin":
+            direction = random.choice(["left", "right"])
+            LAST_THOUGHT = f"[Voice] Spinning around ({direction})."
+            if direction == "left":
+                robot.turn_left()
+            else:
+                robot.turn_right()
+            _voice_sleep(CMD_BURST_SPIN)
+    finally:
+        # End with motors stopped, UNLESS a safety override owns them now (it will
+        # keep issuing its own commands; stomping it even for one frame is worse).
+        if not robot.abort_event.is_set():
+            robot.stop()
+            # Pause autonomous driving so the commanded result visibly sticks.
+            # "come" means "resume following me" -> releases any hold instead.
+            if intent == "stop":
+                autonomy_hold_until = time.time() + VOICE_STAY_HOLD_S
+            elif intent == "come":
+                autonomy_hold_until = 0.0
+            else:
+                autonomy_hold_until = time.time() + VOICE_AUTONOMY_HOLD_S
+        with state_lock:
+            is_robot_busy = False
+            current_voice_intent = None
+
+
+def _pcm_to_wav(pcm_bytes, rate=VOICE_SAMPLE_RATE):
+    """Wrap raw 16-bit mono PCM in a WAV container and return the bytes."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # int16
+        wf.setframerate(rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
+# The model's spoken replies are discarded (we only consume the input transcription),
+# so instruct it to answer as briefly as possible to minimize wasted audio tokens.
+LIVE_VOICE_SYSTEM_INSTRUCTION = (
+    "You are the silent listening ear of a pet robot's voice command system. "
+    "You never chat. Reply to every input with the single word: ok")
+
+
+def _dispatch_voice_text(text, state, source="voice"):
+    """Shared command dispatch for both voice paths (Live streaming and legacy capture).
+    Applies intent matching, cooldown, the same-intent guard and priority preemption
+    (SAFETY > VOICE > autonomy), then launches the motor burst in its own thread.
+    `state` carries `last_cmd_time` between calls."""
+    intent = _match_voice_intent(text)
+    print(f"[AUDITORY] {source} -> '{text}' -> {intent}")
+    if intent is None:
+        return False
+    now = time.time()
+    if now - state.get("last_cmd_time", 0.0) < VOICE_COOLDOWN_S:
+        print(f"[AUDITORY] Skipped '{intent}' (cooldown).")
+        return False
+    # Do not RESTART the same action that is already running (prevents e.g. a
+    # repeated "spin" from preempting and endlessly re-spinning). "stop" is exempt.
+    if is_robot_busy and intent == current_voice_intent and intent != "stop":
+        print(f"[AUDITORY] '{intent}' already running; repeat ignored.")
+        return False
+    state["last_cmd_time"] = now
+
+    # Preempt whatever the robot is doing (except safety overrides, which are
+    # frame-driven in the vision loop and always outrank voice).
+    if is_robot_busy:
+        robot.abort_event.set()   # break out of an emotional expression (express_happy honors this)
+        voice_abort_event.set()   # cut short a running voice burst
+        t0 = time.time()
+        while is_robot_busy and time.time() - t0 < 2.0:
+            time.sleep(0.05)
+        voice_abort_event.clear()
+        if is_robot_busy:
+            print("[AUDITORY] Previous action did not yield in time; command skipped.")
+            return False
+
+    print(f"--> Voice command: {intent}")
+    threading.Thread(target=_run_voice_action, args=(intent,), daemon=True).start()
+    return True
+
+
+async def _live_voice_session(client, model_name, stream, chunk, dev_rate, state):
+    """One Gemini Live session: stream mic PCM up, read the server's TRANSCRIPTION of
+    the user's speech, and dispatch Korean command words locally. Returns True once a
+    session was established (drops end the session cleanly and the caller reconnects);
+    raises if the connection itself cannot be made."""
+    config = {
+        # This model only supports AUDIO responses; the replies are tiny ("ok") and
+        # discarded. What we actually consume is the input transcription below.
+        "response_modalities": ["AUDIO"],
+        "system_instruction": {"parts": [{"text": LIVE_VOICE_SYSTEM_INSTRUCTION}]},
+        "input_audio_transcription": {},
+        # Sliding-window compression extends the session lifetime (fewer reconnects).
+        "context_window_compression": {
+            "trigger_tokens": 800000,
+            "sliding_window": {"target_tokens": 10000},
+        },
+    }
+    async with client.aio.live.connect(model=model_name, config=config) as session:
+        print(f"[AUDITORY] Live session connected ({model_name}); streaming mic audio.")
+
+        async def sender():
+            mime = f"audio/pcm;rate={dev_rate}"
+            while RUNNING:
+                pcm = await asyncio.to_thread(stream.read, chunk, exception_on_overflow=False)
+                await session.send_realtime_input(audio=types.Blob(data=pcm, mime_type=mime))
+
+        async def receiver():
+            # session.receive() is a PER-TURN iterator: it ends when one model turn
+            # completes. Without this outer loop the whole session was torn down and
+            # reconnected after EVERY utterance, leaving a 1-2s deaf gap each time
+            # (observed as intermittent missed commands). Keep pulling turns from the
+            # SAME session instead.
+            while RUNNING:
+                turn_text = ""
+                async for message in session.receive():
+                    if not RUNNING:
+                        return
+                    sc = getattr(message, "server_content", None)
+                    if sc is None:
+                        continue
+                    # Accumulate the transcription of what the USER said this turn.
+                    it = getattr(sc, "input_transcription", None)
+                    if it is not None and getattr(it, "text", None):
+                        turn_text += it.text
+                    # Model audio replies in model_turn parts are intentionally ignored.
+                    if getattr(sc, "turn_complete", False):
+                        text = turn_text.strip()
+                        turn_text = ""
+                        if text:
+                            # Dispatch in a worker thread: it may block up to ~2s on preemption.
+                            await asyncio.to_thread(_dispatch_voice_text, text, state, "live transcript")
+
+        try:
+            tasks = [asyncio.create_task(sender()), asyncio.create_task(receiver())]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            for t in done:
+                exc = t.exception()
+                if exc is not None:
+                    print(f"[AUDITORY] Live session dropped: {exc}; reconnecting.")
+        except Exception as e:
+            print(f"[AUDITORY] Live session error: {e}; reconnecting.")
+        return True
+
+
+def _legacy_voice_loop(client, stream, chunk, dev_rate, state):
+    """Fallback voice path: local energy-VAD captures an utterance, then a single
+    generate_content call classifies it. Higher latency than Live but has no
+    persistent-connection requirement."""
+    global RUNNING
+
+    # Auto-calibrate the VAD thresholds from ~1s of ambient room noise.
+    ambient_samples = []
+    for _ in range(16):
+        try:
+            d = stream.read(chunk, exception_on_overflow=False)
+            s = np.frombuffer(d, dtype=np.int16)
+            if s.size:
+                ambient_samples.append(float(np.sqrt(np.mean(s.astype(np.float32) ** 2))))
+        except Exception:
+            pass
+    # Use the QUIETEST quarter of the samples: calibration may run while the robot's
+    # own motors are driving, and a mean would lock the trigger far above human speech.
+    noise_floor = (sorted(ambient_samples)[max(0, len(ambient_samples) // 4 - 1)]
+                   if ambient_samples else 0.0)
+    rms_start = min(VOICE_RMS_START_MAX, max(VOICE_RMS_FLOOR_START, noise_floor * VOICE_START_FACTOR))
+    rms_stop = max(VOICE_RMS_FLOOR_STOP, noise_floor * VOICE_STOP_FACTOR)
+    print(f"[AUDITORY] Noise floor {noise_floor:.0f} -> speech starts above {rms_start:.0f}, silence below {rms_stop:.0f}.")
+    print("[AUDITORY] Legacy voice loop started (local VAD + Gemini classification).")
+
+    prompt = ("This is a short Korean voice command spoken to a pet robot named 토토 (Toto). "
+              "The command is usually prefixed with the name, e.g. '토토 앞으로'; ignore the name. "
+              "Reply with EXACTLY ONE token from this list and nothing else: "
+              "forward, backward, left, right, stop, spin, come, none. "
+              "The clip may contain only motor/fan noise or background sounds; if there "
+              "is no CLEAR human speech matching one of these commands, reply none.")
+
+    # Disable model thinking for this simple classification: cuts round-trip latency.
+    try:
+        reco_config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_budget=0))
+    except Exception:
+        reco_config = None
+
+    buffering = False
+    voiced = bytearray()
+    preroll = []                       # last few chunks before the trigger (protects the first syllable)
+    silence = 0
+    last_level_log = time.time()
+
     while RUNNING:
         try:
-            with ignore_stderr():
-                opened_source = mic.__enter__()
-            try:
-                recognizer.adjust_for_ambient_noise(opened_source, duration=1)
-                print("[AUDITORY] Listening for vocal commands...")
-                audio = recognizer.listen(opened_source, timeout=4, phrase_time_limit=4)
-            finally:
-                with ignore_stderr():
-                    mic.__exit__(None, None, None)
-                
-            try:
-                # Step 1: Try parsing with Korean first
-                text_ko = recognizer.recognize_google(audio, language='ko-KR').strip()
-                print(f"[AUDITORY] Heard (KO): '{text_ko}'")
-                text = text_ko.lower()
-            except sr.UnknownValueError:
-                try:
-                    # Step 2: Fallback to English parsing on failure
-                    text_en = recognizer.recognize_google(audio, language='en-US').strip()
-                    print(f"[AUDITORY] Heard (EN): '{text_en}'")
-                    text = text_en.lower()
-                except sr.UnknownValueError:
-                    continue
-                    
-            # Multi-language voice command routing and is_robot_busy interlocking to prevent thread racing
-            if any(cmd in text for cmd in ["안녕", "반가워", "강아지", "hello", "hi", "puppy", "dog"]):
-                print("--> Action triggered: Happy Bark")
-                LAST_THOUGHT = "[Voice Command] Saying hello back! Barking happily."
-                def vocal_bark_task():
-                    global is_robot_busy
-                    with state_lock:
-                        is_robot_busy = True
-                    try:
-                        robot.bark()
-                    finally:
-                        with state_lock:
-                            is_robot_busy = False
-                threading.Thread(target=vocal_bark_task, daemon=True).start()
-                
-            elif any(cmd in text for cmd in ["이리와", "온", "come", "here"]):
-                print("--> Action triggered: Come forward")
-                LAST_THOUGHT = "[Voice Command] Approaching the owner."
-                def vocal_come_task():
-                    global is_robot_busy
-                    with state_lock:
-                        is_robot_busy = True
-                    try:
-                        robot.move_forward()
-                        time.sleep(1.2)
-                        robot.stop()
-                    finally:
-                        with state_lock:
-                            is_robot_busy = False
-                threading.Thread(target=vocal_come_task, daemon=True).start()
-                
-            elif any(cmd in text for cmd in ["멈춰", "정지", "그만", "stop", "halt", "quit"]):
-                print("--> Action triggered: Stop")
-                LAST_THOUGHT = "[Voice Command] Stopping all movements immediately."
-                def vocal_stop_task():
-                    global is_robot_busy
-                    with state_lock:
-                        is_robot_busy = True
-                    try:
-                        robot.stop()
-                        time.sleep(1.0) # Maintain stopped state for 1 second for stabilization
-                    finally:
-                        with state_lock:
-                            is_robot_busy = False
-                threading.Thread(target=vocal_stop_task, daemon=True).start()
-                
-        except sr.RequestError as e:
-            print(f"[AUDITORY ERROR] Google Speech API Error: {e}")
-            time.sleep(2)
+            data = stream.read(chunk, exception_on_overflow=False)
+        except Exception:
+            time.sleep(0.05)
+            continue
+
+        samples = np.frombuffer(data, dtype=np.int16)
+        rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) if samples.size else 0.0
+
+        # (1) Voice-activity detection: wait for speech to start.
+        if not buffering:
+            if rms >= rms_start:
+                buffering = True
+                # Include the pre-roll so the utterance onset (below-threshold start of
+                # the first syllable) is not clipped from the clip sent to Gemini.
+                voiced = bytearray(b"".join(preroll))
+                voiced.extend(data)
+                preroll = []
+                silence = 0
+                print(f"[AUDITORY] Speech detected (rms {rms:.0f}), capturing...")
+            else:
+                preroll.append(data)
+                if len(preroll) > VOICE_PREROLL_CHUNKS:
+                    preroll.pop(0)
+                # Continuously adapt the noise floor: snap DOWN instantly when the
+                # room gets quiet (e.g. motors stop), creep UP slowly during noise.
+                noise_floor = rms if rms < noise_floor else min(noise_floor * 1.005 + 1.0, rms)
+                rms_start = min(VOICE_RMS_START_MAX, max(VOICE_RMS_FLOOR_START, noise_floor * VOICE_START_FACTOR))
+                rms_stop = max(VOICE_RMS_FLOOR_STOP, noise_floor * VOICE_STOP_FACTOR)
+            if not buffering and time.time() - last_level_log > 8.0:
+                print(f"[AUDITORY] listening... level rms={rms:.0f} (speech trigger >= {rms_start:.0f})")
+                last_level_log = time.time()
+            continue
+
+        # (2) Capturing an utterance: append until trailing silence or max length.
+        voiced.extend(data)
+        silence = silence + 1 if rms < rms_stop else 0
+        utter_ms = 1000.0 * (len(voiced) / 2) / dev_rate
+        if silence < VOICE_SILENCE_CHUNKS and utter_ms < VOICE_MAX_MS:
+            continue
+
+        # (3) Utterance complete -> reset capture state.
+        pcm = bytes(voiced)
+        buffering = False
+        voiced = bytearray()
+        silence = 0
+
+        if utter_ms < VOICE_MIN_MS:
+            print(f"[AUDITORY] Discarded {utter_ms:.0f} ms blip (below {VOICE_MIN_MS} ms).")
+            continue
+        # Pre-check the cooldown before spending an API call (dispatch re-checks it).
+        if time.time() - state.get("last_cmd_time", 0.0) < VOICE_COOLDOWN_S:
+            print("[AUDITORY] Skipped utterance (cooldown).")
+            continue
+
+        # (4) Recognize the command with Gemini audio understanding.
+        try:
+            wav = _pcm_to_wav(pcm, dev_rate)
+            t_reco = time.time()
+            response = client.models.generate_content(
+                model=VOICE_GEMINI_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=wav, mime_type="audio/wav"),
+                    prompt,
+                ],
+                config=reco_config,
+            )
+            reco_s = time.time() - t_reco
+            text = (response.text or "").strip()
         except Exception as e:
-            time.sleep(1)
+            print(f"[AUDITORY] Gemini audio recognition failed: {e}")
+            continue
+
+        _dispatch_voice_text(text, state, f"utterance ({utter_ms:.0f} ms, gemini {reco_s:.1f}s)")
+
+
+def audio_recognition_thread():
+    global RUNNING, LAST_THOUGHT, is_robot_busy
+
+    if not SPEECH_AVAILABLE:
+        print("[AUDITORY] google-genai unavailable. Voice recognition disabled.")
+        return
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key or api_key == "YOUR_API_KEY":
+        print("[AUDITORY] GEMINI_API_KEY not set. Voice recognition disabled.")
+        return
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print(f"[AUDITORY] Failed to initialize GenAI client for voice: {e}")
+        return
+
+    try:
+        import pyaudio
+        with ignore_stderr():
+            pa = pyaudio.PyAudio()
+
+        # Prefer the USB/camera microphone (same policy as the old recognizer); fall
+        # back to the system default input device.
+        dev_index = None
+        dev_info = {}
+        try:
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                if info.get("maxInputChannels", 0) > 0 and any(
+                        k in str(info.get("name", "")).lower() for k in ("usb", "camera", "webcam")):
+                    dev_index, dev_info = i, info
+                    break
+            if dev_index is None:
+                dev_info = pa.get_default_input_device_info()
+                dev_index = int(dev_info["index"])
+            print(f"[AUDITORY] Microphone: '{dev_info.get('name')}' (index {dev_index})")
+        except Exception as e:
+            print(f"[AUDITORY] Microphone scan failed ({e}); using default device.")
+            dev_index = None
+
+        # Open at 16 kHz if supported, else at the device native rate (the PCM mime
+        # type / WAV header carries the actual rate, so Gemini handles either).
+        stream = None
+        chunk = 1024
+        dev_rate = VOICE_SAMPLE_RATE
+        native_rate = int(float(dev_info.get("defaultSampleRate", 44100) or 44100))
+        for rate in (VOICE_SAMPLE_RATE, native_rate):
+            try:
+                chunk = max(256, int(rate * 0.064))  # ~64 ms of audio per chunk at any rate
+                with ignore_stderr():
+                    stream = pa.open(format=pyaudio.paInt16, channels=1, rate=rate,
+                                     input=True, input_device_index=dev_index,
+                                     frames_per_buffer=chunk)
+                    stream.start_stream()
+                dev_rate = rate
+                break
+            except Exception:
+                stream = None
+        if stream is None:
+            print("[AUDITORY] Failed to open microphone stream at 16000 or native rate. Voice disabled.")
+            return
+        print(f"[AUDITORY] Mic stream open at {dev_rate} Hz (chunk {chunk} frames).")
+    except Exception as e:
+        print(f"[AUDITORY] Failed to open microphone stream: {e}")
+        return
+
+    state = {"last_cmd_time": 0.0}
+
+    # --- PRIMARY: Gemini Live API streaming (server VAD, ~1s command latency) ---
+    live_models = []
+    env_model = os.environ.get("VOICE_LIVE_MODEL")
+    if env_model:
+        live_models.append(env_model)
+    live_models += [m for m in VOICE_LIVE_MODELS if m not in live_models]
+
+    live_supported = hasattr(getattr(client, "aio", None), "live")
+    if not live_supported:
+        print("[AUDITORY] This google-genai version has no Live API support "
+              "(pip install -U google-genai). Using legacy voice mode.")
+
+    live_failures = 0
+    while RUNNING and live_supported and live_failures < VOICE_LIVE_MAX_FAILURES:
+        established = False
+        for model_name in live_models:
+            try:
+                established = asyncio.run(
+                    _live_voice_session(client, model_name, stream, chunk, dev_rate, state))
+            except Exception as e:
+                print(f"[AUDITORY] Live connect failed on '{model_name}': {e}")
+                established = False
+            if established:
+                live_failures = 0
+                break  # session ended (timeout/drop) -> outer loop reconnects
+        if not established:
+            live_failures += 1
+            time.sleep(2.0)
+
+    # --- FALLBACK: capture-and-classify (kept for offline-ish robustness) ---
+    if RUNNING:
+        print("[AUDITORY] Live API unavailable; falling back to capture-and-classify voice mode.")
+        _legacy_voice_loop(client, stream, chunk, dev_rate, state)
+
+    try:
+        with ignore_stderr():
+            stream.stop_stream(); stream.close(); pa.terminate()
+    except Exception:
+        pass
+
 
 # ==========================================
 # 🧠 Thread 3: Cloud Google Gemini API Integration (Cortex)
 # ==========================================
 def gemini_brain_thread():
-    global CURRENT_STATE, LAST_THOUGHT, RAW_FRAME, RUNNING, DETECTED_OBJECTS, LAST_DETECTION_TIME, CAMERA_ACTIVE, LATEST_BBOX, is_robot_busy, GEMINI_STATUS
+    global CURRENT_STATE, LAST_THOUGHT, RAW_FRAME, RUNNING, DETECTED_OBJECTS, LAST_DETECTION_TIME, CAMERA_ACTIVE, LATEST_BBOX, LATEST_BBOX_SEQ, LATEST_BBOX_POSE, is_robot_busy, GEMINI_STATUS
     
     api_key = os.environ.get("GEMINI_API_KEY")
     
@@ -927,24 +1706,37 @@ def gemini_brain_thread():
         with state_lock:
             GEMINI_STATUS = "SIMULATION"
         
-        simulated_minds = [
+        simulated_minds_face = [
             "The owner is smiling and looking straight at me! Approaching cheerfully.",
             "I should stay loyal and keep watching the surroundings.",
-            "Visual field is clear, searching for the owner's presence.",
+            "Visual field is clear, searching for the owner's face presence.",
             "Auditory senses are focused on the surroundings waiting for a voice command."
         ]
         
+        # Clarify in the console how to enable the real Gemini Cloud brain
+        print("\n" + "="*80)
+        print("💡 [CORTEX INFO] To enable the real Gemini Cloud brain (Cortex):")
+        print("   1. Create a file named '.env' in this directory.")
+        print("   2. Add your key inside: GEMINI_API_KEY=your_actual_api_key_here")
+        print("="*80 + "\n")
+
         while RUNNING:
-            time.sleep(6)
+            time.sleep(3) # Faster updates in simulation for immediate feedback
             with frame_lock:
                 has_frame = RAW_FRAME is not None
             if has_frame and RUNNING:
                 import random
                 with state_lock:
-                    LAST_THOUGHT = "[AI SIMULATION] " + random.choice(simulated_minds)
+                    curr_desc = OWNER_DESCRIPTION
+
+                thought = f"[AI SIMULATION] {random.choice(simulated_minds_face)} (Targeting: {curr_desc})"
+
+                with state_lock:
+                    LAST_THOUGHT = thought
                     # Clear fake multi-detection list in simulation mode
                     DETECTED_OBJECTS = []
                     LAST_DETECTION_TIME = 0.0
+                print(f"[CORTEX SIMULATION] Description: {curr_desc} | Thought: {LAST_THOUGHT}")
         return
 
     try:
@@ -959,15 +1751,23 @@ def gemini_brain_thread():
         return
 
     # High-speed low-latency prompt designed to integrate both multi-object detection and owner localization
-    if PYDANTIC_AVAILABLE:
-        prompt = f"You are the robotic puppy's brain. Analyze the camera image to track the owner ({OWNER_DESCRIPTION}), detect other surrounding toys or food objects, and generate a brief inner thought of yours."
-    else:
-        prompt = f"""
+    consecutive_failures = 0
+    while RUNNING:
+        # Dynamic prompt reconstruction based on current OWNER_DESCRIPTION
+        with state_lock:
+            curr_desc = OWNER_DESCRIPTION
+
+        owner_prompt_segment = f"Locate the target owner, who is a person defined as: {curr_desc}."
+        
+        if PYDANTIC_AVAILABLE:
+            prompt = f"You are the robotic puppy's brain. Analyze the camera image to track the owner ({curr_desc}), detect other surrounding toys or food objects, and generate a brief inner thought of yours."
+        else:
+            prompt = f"""
     You are the robotic puppy's brain. Based on the camera image:
-    1. Locate the target owner, who is defined as: {OWNER_DESCRIPTION}.
-       - Find the bounding box of the person in the image.
-       - If a person is present, detect them as the owner and output their bounding box in 'owner_box'.
-       - If no person is present, set 'owner_box' to null.
+    1. {owner_prompt_segment}
+       - Find the bounding box of this target in the image.
+       - If the target is present, detect it as the owner and output its bounding box in 'owner_box'.
+       - If no such target is present, set 'owner_box' to null.
     2. Detect up to 8 other notable surrounding objects (like toys, cups, food, bowls, books, keys, etc.) and provide their 2D bounding boxes and labels in 'detected_objects'.
     3. Generate a brief English thought explaining what you see and how you feel as a robotic puppy.
     
@@ -990,9 +1790,6 @@ def gemini_brain_thread():
     
     Return ONLY the raw JSON block without markdown formatting or backticks.
     """
-
-    consecutive_failures = 0
-    while RUNNING:
         clean_frame = None
         if CAMERA_ACTIVE:
             with camera_lock:
@@ -1004,6 +1801,9 @@ def gemini_brain_thread():
             
         if clean_frame is not None:
             snapshot_time = time.time()
+            # Record the robot pose at CAPTURE time: the vision thread compares it with
+            # the pose at verdict ARRIVAL to reject spatially-stale anchors.
+            snapshot_pose = (robot.theta, robot.x, robot.y)
             ret, buffer = cv2.imencode('.jpg', clean_frame)
             if ret:
                 image_bytes = buffer.tobytes()
@@ -1095,11 +1895,12 @@ def gemini_brain_thread():
                     
                     # 2. Update target owner box data with stale response safety check and robust scaling/fallbacks
                     if owner_box is None:
-                        # Fallback: search for person/man/woman/owner in detected_objects to use as owner_box
+                        # Fallback: search for owner/person keywords in detected_objects to use as owner_box
                         for obj in valid_objects:
                             lbl = obj.get("label", "").lower()
-                            if any(p in lbl for p in ["person", "man", "woman", "owner"]):
-                                owner_box = obj.get("box_2d") if PYDANTIC_AVAILABLE else obj.get("box_2d")
+                            keywords = ["person", "man", "woman", "owner", "face"]
+                            if any(p in lbl for p in keywords):
+                                owner_box = obj.get("box_2d")
                                 print(f"ℹ️ [CORTEX] owner_box was null, but found '{lbl}' in detected_objects. Fusing as owner_box!")
                                 break
 
@@ -1122,6 +1923,8 @@ def gemini_brain_thread():
                             print("[CORTEX] Discarding stale pre-gaze API response.")
                         else:
                             LATEST_BBOX = validated_box
+                            LATEST_BBOX_POSE = snapshot_pose
+                            LATEST_BBOX_SEQ += 1  # signal the vision thread that a fresh verdict is ready
                         
                         # 3. Record Cortex thought log
                         LAST_THOUGHT = thought_text
@@ -1197,18 +2000,29 @@ def gemini_brain_thread():
 def streaming_encoder_thread():
     global RAW_FRAME, LATEST_JPEG_BYTES, RUNNING
     print("✅ [STREAM ENCODER] Background streaming encoder thread started.")
-    
+
+    # Skip re-encoding when the source frame object has not changed since the last
+    # pass (each vision/camera iteration publishes a NEW array object, so object
+    # identity is a reliable and free "new frame?" check). Holding this reference
+    # also prevents id reuse. Saves Pi CPU whenever the pipeline stalls or idles.
+    last_encoded_frame = None
+
     while RUNNING:
         clean_frame = None
+        source_ref = None
         with frame_lock:
             if RAW_FRAME is not None:
-                clean_frame = RAW_FRAME.copy()
-        
+                source_ref = RAW_FRAME
+                if source_ref is not last_encoded_frame:
+                    clean_frame = RAW_FRAME.copy()
+
         # [STREAM FALLBACK] If RAW_FRAME is not available yet, directly fetch from live camera buffer
-        if clean_frame is None and LATEST_CAMERA_FRAME is not None:
+        if source_ref is None and LATEST_CAMERA_FRAME is not None:
             with camera_lock:
-                clean_frame = LATEST_CAMERA_FRAME.copy()
-                
+                source_ref = LATEST_CAMERA_FRAME
+                if source_ref is not last_encoded_frame:
+                    clean_frame = LATEST_CAMERA_FRAME.copy()
+
         if clean_frame is not None:
             try:
                 # [DEMO-OPTIMIZED] Rescale and compress dynamically based on dashboard settings
@@ -1217,9 +2031,10 @@ def streaming_encoder_thread():
                 if ret:
                     with jpeg_lock:
                         LATEST_JPEG_BYTES = jpeg_buffer.tobytes()
+                    last_encoded_frame = source_ref
             except Exception as e:
                 print(f"⚠️ [STREAM ENCODER] Compression error: {e}")
-                
+
         # Perform streaming-only encoding at approx 30 FPS using STREAM_ENCODE_INTERVAL
         time.sleep(STREAM_ENCODE_INTERVAL)
 
@@ -1227,6 +2042,12 @@ def streaming_encoder_thread():
 # 🖥 Flask Web Monitoring Dashboard Resources and API
 # ==========================================
 app = Flask(__name__)
+
+# Silence werkzeug per-request access logs ("GET /status HTTP/1.1" 200): the dashboard
+# polls /status at 4 Hz, which would otherwise flood the console and bury the robot's
+# own [AUDITORY]/[CORTEX]/[GPIO] logs. Errors are still printed.
+import logging
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 def get_cpu_temp():
     """Reads the Raspberry Pi onboard SOC CPU temperature, with random fallback for simulation."""
@@ -1240,16 +2061,26 @@ def get_cpu_temp():
 
 def generate_mjpeg_stream():
     global LATEST_JPEG_BYTES
+    last_sent = None          # bytes object identity of the last frame this client received
+    last_sent_time = 0.0
     while True:
         bytes_to_yield = None
         with jpeg_lock:
             if LATEST_JPEG_BYTES is not None:
                 bytes_to_yield = LATEST_JPEG_BYTES
-                
+
         if bytes_to_yield is None:
             time.sleep(STREAM_SERVE_INTERVAL)
             continue
+        # Send only NEW frames (browsers keep displaying the last MJPEG frame), with a
+        # ~2s keepalive resend so proxies/clients do not treat the stream as dead.
+        now = time.time()
+        if bytes_to_yield is last_sent and now - last_sent_time < 2.0:
+            time.sleep(STREAM_SERVE_INTERVAL)
+            continue
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + bytes_to_yield + b'\r\n')
+        last_sent = bytes_to_yield
+        last_sent_time = now
         time.sleep(STREAM_SERVE_INTERVAL)  # Keep web streaming around 20 FPS using STREAM_SERVE_INTERVAL
 
 @app.route('/video_feed')
@@ -1258,25 +2089,52 @@ def video_feed():
 
 @app.route('/status')
 def status():
-    with state_lock:
-        curr_state = CURRENT_STATE
-        last_thought = LAST_THOUGHT
-        gemini_status = GEMINI_STATUS
-        
-    return jsonify({
-        "state": curr_state,
-        "thought": last_thought,
-        "cpu_temp": get_cpu_temp(),
-        "gemini_status": gemini_status,
-        "x": round(robot.x, 1),
-        "y": round(robot.y, 1),
-        "theta": round(robot.theta, 1),
-        "is_out_of_bounds": robot.is_out_of_bounds,
-        # [ODO-SAFETY] drift telemetry so the operator knows when a re-home is required
-        "position_uncertainty": round(getattr(robot, 'position_uncertainty', 0.0), 1),
-        "needs_rehome": getattr(robot, 'needs_rehome', False),
-        "is_barking": (time.time() - getattr(robot, 'bark_time', 0.0)) < 0.9  # [WOW EFFECT] Trigger dashboard visual flash
-    })
+    try:
+        with state_lock:
+            curr_state = CURRENT_STATE
+            last_thought = LAST_THOUGHT
+            gemini_status = GEMINI_STATUS
+            dash_objects = list(DASHBOARD_OBJECTS)
+            # Live object count: how many objects Gemini saw in its latest fresh pass
+            # (independent of the pointer-hiding motion gate, so it stays meaningful
+            # while the robot is driving).
+            objects_seen = (len(DETECTED_OBJECTS)
+                            if (time.time() - LAST_DETECTION_TIME) < OBJECT_STALE_TIMEOUT else 0)
+
+        return jsonify({
+            "state": curr_state,
+            "thought": last_thought,
+            "cpu_temp": get_cpu_temp(),
+            "gemini_status": gemini_status,
+            "detected_objects": dash_objects,
+            "objects_seen": objects_seen,
+            "is_moving": getattr(robot, 'last_action', None) not in ['stop', None],
+            "x": round(getattr(robot, 'x', 0.0), 1),
+            "y": round(getattr(robot, 'y', 0.0), 1),
+            "theta": round(getattr(robot, 'theta', 0.0), 1),
+            "is_out_of_bounds": getattr(robot, 'is_out_of_bounds', False),
+            "position_uncertainty": round(getattr(robot, 'position_uncertainty', 0.0), 1),
+            "needs_rehome": getattr(robot, 'needs_rehome', False),
+            "is_barking": (time.time() - getattr(robot, 'bark_time', 0.0)) < 0.9
+        })
+    except Exception as e:
+        print(f"❌ [API ERROR] Exception in /status route: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "state": "ERROR",
+            "thought": f"[API Server Error] {str(e)}",
+            "cpu_temp": 0.0,
+            "gemini_status": "ERROR",
+            "detected_objects": [],
+            "objects_seen": 0,
+            "is_moving": False,
+            "x": 0.0, "y": 0.0, "theta": 0.0,
+            "is_out_of_bounds": False,
+            "position_uncertainty": 0.0,
+            "needs_rehome": False,
+            "is_barking": False
+        })
 
 @app.route('/reset_odometry', methods=['POST'])
 def reset_odometry_route():
@@ -1298,13 +2156,14 @@ def set_stream_quality_route():
         STREAM_JPEG_QUALITY = quality
     return jsonify({"status": "success", "width": width, "height": height, "quality": quality})
 
+
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lyria | Gemini Robotics Live HUD</title>
+    <title>Gemini Robotics ER Live HUD</title>
     <!-- Premium Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1464,6 +2323,44 @@ HTML_DASHBOARD_TEMPLATE = """
             object-fit: cover;
         }
 
+        /* Scanning indicator + live object counter (inside the video frame) */
+        #scan-indicator {
+            position: absolute;
+            top: 14px;
+            right: 16px;
+            z-index: 12;
+            display: none;
+            padding: 4px 10px;
+            border-radius: 6px;
+            background: rgba(5, 5, 8, 0.55);
+            border: 1px solid rgba(0, 240, 255, 0.35);
+            color: var(--accent-cyan);
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            pointer-events: none;
+            animation: scan-pulse 1.1s ease-in-out infinite;
+        }
+        @keyframes scan-pulse {
+            0%, 100% { opacity: 0.35; }
+            50% { opacity: 1; }
+        }
+        #objects-badge {
+            position: absolute;
+            bottom: 14px;
+            right: 16px;
+            z-index: 12;
+            padding: 4px 10px;
+            border-radius: 6px;
+            background: rgba(5, 5, 8, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: #e8ecf1;
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            pointer-events: none;
+        }
+
         /* 📡 HUD Technical Overlays (Corner Brackets) */
 
         .corner-bracket {
@@ -1570,6 +2467,12 @@ HTML_DASHBOARD_TEMPLATE = """
             color: #9d4edd;
             border-color: rgba(124,77,255,0.12);
             text-shadow: 0 0 15px rgba(124,77,255,0.2);
+        }
+        .state-RETURNING {
+            background-color: rgba(52, 168, 235, 0.05);
+            color: #34a8eb;
+            border-color: rgba(52,168,235,0.12);
+            text-shadow: 0 0 15px rgba(52,168,235,0.2);
         }
 
         /* 🎛️ Motor Actuator Telemetry Vector Pad */
@@ -1896,7 +2799,15 @@ HTML_DASHBOARD_TEMPLATE = """
                 <div class="corner-bracket bottom-left"></div>
                 <div class="corner-bracket bottom-right"></div>
 
-                <img src="/video_feed" alt="Robot Camera Stream">
+                <!-- Scanning indicator: shown while driving (object labels return on pause) -->
+                <div id="scan-indicator">SCANNING...</div>
+                <!-- Live object counter: latest Gemini detection count, safe during motion -->
+                <div id="objects-badge">OBJECTS SEEN: 0</div>
+
+                <!-- 🎯 High-Fidelity HTML/CSS Vector Overlay layer -->
+                <div id="vector-overlay-container" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10;"></div>
+
+                <img id="video-stream" src="/video_feed" alt="Robot Camera Stream">
             </div>
 
             <!-- [ODO-SAFETY] Re-home warning banner (shown when odometry drift makes the position untrusted) -->
@@ -2006,9 +2917,150 @@ HTML_DASHBOARD_TEMPLATE = """
     </div>
 
     <script>
+        // 🚨 Global Error HUD: Instantly display any dashboard JS error on the timeline for real-time debugging!
+        window.onerror = function(message, source, lineno, colno, error) {
+            console.error("Global JS Error:", message, "at line", lineno);
+            const thoughtsTimeline = document.getElementById('thoughts-timeline');
+            if (thoughtsTimeline) {
+                const item = document.createElement('div');
+                item.className = 'timeline-item active';
+                item.style.border = '1px solid #ff3366';
+                item.style.background = 'rgba(255, 51, 102, 0.1)';
+                item.style.padding = '8px 12px';
+                item.style.borderRadius = '8px';
+                item.style.marginTop = '8px';
+                item.innerHTML = `
+                    <div class="timeline-dot" style="background-color: #ff3366; box-shadow: 0 0 10px #ff3366;"></div>
+                    <div class="timeline-text" style="color: #ff5c85; font-family: monospace; font-size: 0.8rem; font-weight: 700;">[Dashboard JS Error] ${message} (Line ${lineno})</div>
+                `;
+                thoughtsTimeline.prepend(item);
+            }
+            return false;
+        };
+
         let thoughtsHistory = [];
         const stateBadge = document.getElementById('state-badge');
         const timelineContainer = document.getElementById('thoughts-timeline');
+        const overlayContainer = document.getElementById('vector-overlay-container');
+
+        // 🎯 High-Fidelity HTML/CSS Vector Overlay renderer with ELEMENT REUSE:
+        // positions glide via CSS transitions (smooth between polls) and objects that
+        // vanish from the data fade out instead of blinking off.
+        const overlayItems = new Map();   // key -> {el, missingSince}
+        const OVERLAY_ANIM = 'left 0.25s linear, top 0.25s linear, width 0.25s linear, height 0.25s linear, opacity 0.3s ease';
+        const OVERLAY_FADE_REMOVE_MS = 900;
+
+        function overlayGet(key, create) {
+            let item = overlayItems.get(key);
+            if (!item) {
+                const el = create();
+                el.style.transition = OVERLAY_ANIM;
+                el.style.opacity = '0';            // fades in on the next frame
+                overlayContainer.appendChild(el);
+                item = { el: el, missingSince: null };
+                overlayItems.set(key, item);
+            }
+            item.missingSince = null;
+            requestAnimationFrame(() => { item.el.style.opacity = '1'; });
+            return item.el;
+        }
+
+        function renderOverlayObjects(detectedObjects) {
+            if (!overlayContainer) return;
+            const seen = new Set();
+            const dup = {};
+
+            (Array.isArray(detectedObjects) ? detectedObjects : []).forEach(obj => {
+                if (!obj) return;
+                const box = obj.box_2d;
+                const label = obj.label || 'Object';
+                const type = obj.type || 'cortex';
+                if (!box || !Array.isArray(box) || box.length !== 4) return;
+
+                const ymin = box[0], xmin = box[1], ymax = box[2], xmax = box[3];
+                const cx_pct = (xmin + xmax) / 2 / 10;
+                const cy_pct = (ymin + ymax) / 2 / 10;
+
+                let key = type + ':' + label;
+                dup[key] = (dup[key] || 0) + 1;    // disambiguate duplicate labels
+                key += ':' + dup[key];
+
+                // 1. Tech-style thin bounding box for the active target
+                if (type === 'active') {
+                    const bboxEl = overlayGet(key + ':box', () => {
+                        const el = document.createElement('div');
+                        el.style.position = 'absolute';
+                        el.style.border = '2px solid var(--accent-cyan)';
+                        el.style.borderRadius = '12px';
+                        el.style.boxShadow = '0 0 15px rgba(0, 240, 255, 0.25), inset 0 0 15px rgba(0, 240, 255, 0.08)';
+                        el.style.pointerEvents = 'none';
+                        return el;
+                    });
+                    bboxEl.style.left = (xmin / 10) + '%';
+                    bboxEl.style.top = (ymin / 10) + '%';
+                    bboxEl.style.width = ((xmax - xmin) / 10) + '%';
+                    bboxEl.style.height = ((ymax - ymin) / 10) + '%';
+                    seen.add(key + ':box');
+                }
+
+                // 2. High-definition vector pointer (dot + label badge)
+                const ptr = overlayGet(key + ':ptr', () => {
+                    const el = document.createElement('div');
+                    el.style.position = 'absolute';
+                    el.style.display = 'flex';
+                    el.style.alignItems = 'center';
+                    el.style.gap = '8px';
+                    el.style.pointerEvents = 'none';
+                    el.style.transform = 'translate(-5px, -50%)'; // Perfect sub-pixel dot alignment
+
+                    const dot = document.createElement('div');
+                    dot.style.width = '10px';
+                    dot.style.height = '10px';
+                    dot.style.borderRadius = '50%';
+                    dot.style.backgroundColor = (type === 'active') ? 'var(--accent-cyan)' : '#1a73e8';
+                    dot.style.border = '2.5px solid #ffffff';
+                    dot.style.boxShadow = '0 0 8px rgba(0,0,0,0.45)';
+                    dot.style.flexShrink = '0';
+
+                    const tag = document.createElement('div');
+                    tag.style.backgroundColor = (type === 'active') ? 'rgba(0, 110, 120, 0.82)' : '#1a73e8';
+                    tag.style.border = (type === 'active') ? '1px solid rgba(0, 240, 255, 0.35)' : '1px solid rgba(255,255,255,0.12)';
+                    tag.style.color = '#ffffff';
+                    tag.style.padding = '4px 10px';
+                    tag.style.borderRadius = '6px';
+                    tag.style.fontSize = '11px';
+                    tag.style.fontWeight = '700';
+                    tag.style.fontFamily = "'Inter', 'Outfit', system-ui, sans-serif";
+                    tag.style.whiteSpace = 'nowrap';
+                    tag.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+                    tag.style.textTransform = 'lowercase';
+                    tag.style.backdropFilter = 'blur(4px)';
+                    tag.style.webkitBackdropFilter = 'blur(4px)';
+                    tag.style.letterSpacing = '0.02em';
+
+                    el.appendChild(dot);
+                    el.appendChild(tag);
+                    return el;
+                });
+                ptr.style.left = cx_pct + '%';
+                ptr.style.top = cy_pct + '%';
+                ptr.lastElementChild.innerText = label;   // keep the badge text fresh on reuse
+                seen.add(key + ':ptr');
+            });
+
+            // Fade out overlays that vanished from the data, then remove them.
+            const now = performance.now();
+            for (const [key, item] of overlayItems) {
+                if (seen.has(key)) continue;
+                if (item.missingSince === null) {
+                    item.missingSince = now;
+                    item.el.style.opacity = '0';
+                } else if (now - item.missingSince > OVERLAY_FADE_REMOVE_MS) {
+                    item.el.remove();
+                    overlayItems.delete(key);
+                }
+            }
+        }
 
         function updateTimeline(newThought) {
             if (!newThought) return;
@@ -2042,6 +3094,17 @@ HTML_DASHBOARD_TEMPLATE = """
                     // Update state badge
                     stateBadge.innerText = "CURRENT STATE: " + data.state;
                     stateBadge.className = "status-badge state-" + data.state;
+                    
+                    // Render HTML/CSS Vector Overlays with infinite sharpness
+                    renderOverlayObjects(data.detected_objects);
+
+                    // Scanning indicator (labels hidden while driving) + live object counter
+                    const scanEl = document.getElementById('scan-indicator');
+                    if (scanEl) scanEl.style.display = data.is_moving ? 'block' : 'none';
+                    const objBadge = document.getElementById('objects-badge');
+                    if (objBadge && data.objects_seen !== undefined) {
+                        objBadge.innerText = 'OBJECTS SEEN: ' + data.objects_seen;
+                    }
                     
                     // Update thoughts stream timeline
                     updateTimeline(data.thought);
@@ -2116,7 +3179,18 @@ HTML_DASHBOARD_TEMPLATE = """
                     }
                 })
                 .catch(err => console.error("Error fetching status:", err));
-        }, 500); // [DEMO-OPTIMIZED] Polling at 2Hz (500ms) to prevent Pi power spikes while keeping smooth video
+        }, 250); // 4Hz polling: the HTML/CSS overlay is now the ONLY annotation layer, so a faster refresh keeps the boxes tracking smoothly (raise back to 500 if Pi load is a concern)
+
+        // Auto-reconnect the MJPEG stream if it errors out (e.g. server restart);
+        // without this the <img> freezes on a broken frame until a manual refresh.
+        const videoStream = document.getElementById('video-stream');
+        if (videoStream) {
+            videoStream.onerror = function() {
+                setTimeout(function() {
+                    videoStream.src = '/video_feed?ts=' + Date.now();
+                }, 2000);
+            };
+        }
 
         // Reset Odometry Handler
         const resetBtn = document.getElementById('reset-odometry-btn');
@@ -2179,6 +3253,7 @@ def index():
 if __name__ == '__main__':
     print("==========================================================")
     print("🤖 GEMINI EMBEDDED AI ROBOT PUPPY STARTING...")
+    print(f"    CORE BUILD: {CORE_BUILD}")
     print("==========================================================")
     
     t_cam = threading.Thread(target=camera_capture_thread)
