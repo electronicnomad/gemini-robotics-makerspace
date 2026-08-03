@@ -6,6 +6,38 @@
 
 A hybrid robotics architecture combining cloud-based multimodal AI (Cortex) with high-speed local control loops (Reflex) for a companion robot puppy, created for the **Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)** booth.
 
+![Gemini Robotics Makerspace Booth](./media/scene-1.jpg)
+
+---
+
+## Why We Built It (Motivation & Vision)
+
+Traditional educational or toy robots operate purely on hardcoded mechanical reflexes—spinning motors based on direct pin signals without understanding context, recognizing objects, or possessing an inner narrative.
+
+Created for the **Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)** exhibition booth, this project bridges the gap between cold hardware and genuine companion interaction. By fusing a high-level cloud AI (Cortex) with a high-speed local control loop (Reflex), the robot puppy "Toto" gains a "digital soul":
+- **Contextual Vision**: Detects owners, toys, and food bowls in 2D space (`[ymin, xmin, ymax, xmax]` normalized coordinates).
+- **Inner Monologue**: Generates real-time thoughts explaining what it sees and how it feels as a companion puppy.
+- **Emotional Expressiveness**: Barks and wags for toys, whines/beeps for food, and tracks the owner's face while remaining safely bounded on a table via dead-reckoning odometry.
+
+---
+
+## Operating Mechanism (How It Works)
+
+The robot operates through a **dual-tier hybrid AI architecture**:
+
+1. **Cortex Layer (Cloud Multimodal AI)**:
+   - Asynchronously sends camera snapshots to Google Cloud Gemini API (`gemini-robotics-er-1.6-preview` with fallback to `gemini-2.5-flash`).
+   - Analyzes semantic context, identifies target objects, and yields inner thoughts and emotional behavioral commands.
+2. **Reflex Layer (Local High-Speed Vision)**:
+   - Runs OpenCV Haar Cascade face detection at 30 FPS locally on Raspberry Pi 4B (downsampled to 320x240 for CPU optimization).
+   - Adjusts motor heading and proportional distance alignment in real-time, unaffected by network latency.
+3. **Auditory Layer (Voice Commands)**:
+   - Listens to microphone audio via `SpeechRecognition` for bilingual Korean and English commands ("이리와 / Come here", "인사 / Hello", "멈춰 / Stop").
+4. **Odometry & Table Safety Layer**:
+   - Tracks 2D coordinates `(X, Y, Heading)` on a `1200mm x 800mm` virtual table. Calculates cross-product vectors $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$ to automatically steer back to center when hitting boundary margins.
+5. **Hardware MCU Reflex Layer (`./robo-rogic-code/`)**:
+   - Roborobo MCU runs Rogic Program logic for floor tape/cliff detection (2 front IR sensors) and rear obstacle avoidance (1 rear IR sensor).
+
 ---
 
 ## Architecture Overview
@@ -16,33 +48,40 @@ The physical robot is constructed using the [ROBO KIT STEP 1 to 3](https://robor
 - **2 Front-facing IR Sensors (Floor-directed)**: Continuously monitor the surface beneath the robot. If a black boundary line appears or if the floor disappears (table edge/cliff), the MCU logic immediately stops the robot and steps back.
 - **1 Rear-facing IR Sensor (Backward-directed)**: Detects walls or obstacles approaching from behind. When an obstacle gets too close, the MCU logic stops the robot and moves it forward/away from the barrier.
 
-```text
-+-----------------------------------------------------------------------------------+
-|                                 CORTEX (Cloud AI)                                 |
-|             Google Gemini API (gemini-robotics-er-1.6-preview / flash)            |
-|       Bounding box vision, multi-object detection, emotional thought & audio       |
-+-----------------------------------------------------------------------------------+
-                                         |
-                                         v
-+-----------------------------------------------------------------------------------+
-|                              RASPBERRY PI 4B (Brain)                              |
-|                                                                                   |
-|  +-----------------------+  +----------------------+  +------------------------+  |
-|  |   Reflex (Local CV)   |  | Auditory (Speech)    |  |  Virtual Odometry      |  |
-|  |  OpenCV 30 FPS Face   |  | SpeechRecognition    |  |  Table edge Fail-Safe  |  |
-|  |  Tracking & Alignment |  | Korean/English STT   |  |  Coordinate Tracker    |  |
-|  +-----------------------+  +----------------------+  +------------------------+  |
-|                                                                                   |
-|  +-----------------------------------------------------------------------------+  |
-|  |                   Flask Web Dashboard & MJPEG Video Stream                  |  |
-|  +-----------------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------------+
-                                         |
-                                         v (GPIO Active-Low Open-Drain)
-+-----------------------------------------------------------------------------------+
-|                           ROBOROBO CPU BOARD & ACTUATORS                          |
-|                     DC Motors / Level Shifter / Beeper / LED                      |
-+-----------------------------------------------------------------------------------+
+![Robot Hardware Evolution (1st Prototype to 3rd Finished Model)](./media/prototype-evolution.jpg)
+
+```mermaid
+graph TD
+    subgraph CORTEX ["CORTEX Layer (Cloud AI)"]
+        Gemini["Google Gemini API (gemini-robotics-er-1.6-preview / 2.5-flash)<br/>• 2D Bounding Boxes & Multi-Object Detection<br/>• Inner Thought & Emotion Generation"]
+    end
+
+    subgraph RPI ["RASPBERRY PI 4B (Main Brain)"]
+        direction TB
+        subgraph LOOPS ["Parallel Processing Loops"]
+            Reflex["Reflex (Local CV)<br/>OpenCV 30 FPS Face Tracking"]
+            Audio["Auditory (Speech)<br/>SpeechRecognition STT"]
+            Odo["Virtual Odometry<br/>Table-Edge Safety Fail-Safe"]
+        end
+        Flask["Flask Web Dashboard (Port 5000)<br/>MJPEG Video Stream & Telemetry HUD"]
+    end
+
+    subgraph LEVELSHIFTER ["BIDIRECTIONAL LEVEL SHIFTER"]
+        LS["Level Shifter (3.3V ↔ 5V Logic)<br/>Active-Low Open-Drain Signaling"]
+    end
+
+    subgraph ROBOROBO ["ROBOROBO CPU BOARD & SENSORS"]
+        MCU["Roborobo CPU Board<br/>• MCU Logic (Rogic Program)<br/>• 3x IR Sensors (2 Floor, 1 Rear)"]
+    end
+
+    subgraph ACTUATORS ["ACTUATORS & OUTPUTS"]
+        ACT["DC Motors & Output<br/>• Dual DC Motors (Omnidirectional)<br/>• Buzzer & Status LED"]
+    end
+
+    Gemini -->|"Async Snapshot & Telemetry"| RPI
+    RPI -->|"3.3V GPIO Signals"| LEVELSHIFTER
+    LEVELSHIFTER -->|"5V Logic & Sensor Feedback"| ROBOROBO
+    ROBOROBO -->|"Motor Drive Output"| ACTUATORS
 ```
 
 ---
@@ -58,9 +97,10 @@ The physical robot is constructed using the [ROBO KIT STEP 1 to 3](https://robor
    - High-speed OpenCV Haar Cascade face detection loop running at 30 FPS.
    - Distance-based proportional alignment: adjusts motor heading to keep the target centered and maintains a comfortable distance (moving forward if far, backward if too close).
 
-3. **Auditory Layer (Voice Control)**
-   - Listens to microphone audio via `SpeechRecognition` and `PyAudio`.
-   - Supports bilingual voice commands in Korean and English (e.g., "이리와 / Come here", "인사 / Hello", "멈춰 / Stop").
+3. **Auditory Layer (Voice Control & Live API Streaming)**
+   - Streams live microphone audio via WebSockets using the **Gemini Live API (`gemini-3.1-flash-live-preview`)** for zero-latency natural language intent matching.
+   - Falls back to `SpeechRecognition` / `PyAudio` with `gemini-2.5-flash` if WebSocket streaming is unavailable.
+   - Supports bilingual voice commands: `이리와` (come), `멈춰` / `정지` (stop), `돌아` (spin), `앞으로` (forward), `뒤로` (backward), `인사` / `안녕` (greet), `짖어` / `멍멍` (bark).
 
 4. **Odometry & Table Safety System**
    - Software-based dead-reckoning odometry to track virtual coordinates `(X, Y, Heading)`.
@@ -109,6 +149,59 @@ The system achieves low latency by distributing tasks across **5 background daem
 
 ---
 
+## Live Demonstration Scenarios & Feature Verification
+
+The system includes four primary interactive demonstration scenarios:
+
+1. **Eye-Contact & Proportional Face Tracking (Reflex)**:
+   - Stand in front of the camera (0.5m - 1.5m). The robot detects face coordinates at 30 FPS and rotates motors to keep the target centered. It moves forward if the user steps back, and retreats if the user gets too close.
+2. **Object Recognition & Emotional Reactions (Cortex)**:
+   - Show a toy bone or food bowl to the camera. The Gemini Cortex detects the object bounding box `[ymin, xmin, ymax, xmax]`, builds an inner thought, and triggers contextual emotions (barking joyfully for toys, whining/beeping for food).
+3. **Bilingual Voice Commands (Auditory)**:
+   - Speak natural language commands into the microphone ("이리와 / Come here", "인사 / Hello", "멈춰 / Stop"). The auditory thread translates audio to STT and executes motion triggers.
+4. **Table-Edge Escape & Fail-Safe (Odometry)**:
+   - Drive the robot toward the table edge. When virtual coordinates hit boundary limits (`1200mm x 800mm`), the robot stops and uses vector cross-product math $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$ to automatically steer back toward safety.
+
+---
+
+## Frequently Asked Questions (FAQ)
+
+- **Q: Is camera processing purely cloud-based?**
+  - **A**: No, it uses a **hybrid architecture**. Real-time 30 FPS face alignment is handled locally on the Raspberry Pi via OpenCV. High-level semantic object recognition and inner thought generation are processed asynchronously via Google Cloud Gemini API.
+- **Q: What happens if network latency increases or Wi-Fi drops?**
+  - **A**: If the primary `gemini-robotics-er-1.6-preview` API request fails, the system automatically falls back to `gemini-2.5-flash` or local Simulation Mind mode, while local OpenCV tracking and odometry safety loops continue running uninterrupted.
+- **Q: How does the system handle 'Uncertainty Limit Exceeded'?**
+  - **A**: Open-loop odometry accumulates drift over time. When estimated position uncertainty exceeds $250\text{mm}$, the fail-safe locks motor operations to prevent accidental falls. Simply click the **`[Reset Odometry]` / `[Re-home]`** button on the Flask HUD dashboard to reset coordinates.
+
+---
+
+## Advanced Feature: Pydantic Structured Outputs Migration
+
+To ensure zero JSON parsing failures, Gemini API calls can be enforced via Pydantic schemas using the `google-genai==2.10.0` SDK:
+
+```python
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
+class DetectedObject(BaseModel):
+    box_2d: List[int] = Field(..., description="[ymin, xmin, ymax, xmax] normalized 0-1000 integer scale.")
+    label: str = Field(..., description="Object label (e.g. 'toy bone', 'food bowl').")
+
+class PuppyBrainResponse(BaseModel):
+    owner_box: Optional[List[int]] = Field(None, description="[ymin, xmin, ymax, xmax] of owner.")
+    detected_objects: List[DetectedObject] = Field(default_factory=list)
+    thought: str = Field(..., description="Inner thought explaining what you see and feel.")
+
+# API Integration with response_schema
+config = types.GenerateContentConfig(
+    response_mime_type="application/json",
+    response_schema=PuppyBrainResponse,
+    temperature=0.3
+)
+```
+
+---
+
 ## Directory Structure
 
 ```text
@@ -116,23 +209,29 @@ gemini-robotics-makerspace/
 ├── robot_puppy_core.py               # Main brain controller & Flask HUD web server
 ├── robot_controller.py               # Low-level GPIO motor control & odometry engine
 ├── check_env.py                      # Diagnostic tool for environment & Gemini API
+├── start.sh                          # Startup script (venv activation & elevated launch)
+├── stop.sh                           # Emergency stop script (halts all DC motors)
 ├── requirements.txt                  # Python dependencies
 ├── .env.example                      # Environment variables template
-├── gemini-structured-outputs-guide.md# Guide for Gemini Pydantic structured output migration
 ├── LICENSE                           # Open source MIT license
+├── media/                            # Exhibition scene photos & 1024px compressed assets
+│   ├── scene-1.jpg
+│   ├── scene-2.jpg
+│   └── ...
 ├── robo-rogic-code/                 # Rogic Program MCU code (.rpj) for Roborobo kit
 │   └── robo-raspi-ifelse-avoid-black-line.rpj
 ├── __tests_and_diagnostics/          # Hardware diagnostic scripts
 │   ├── diagnose_pins.py              # GPIO pin tester
 │   ├── test_motor.py                 # Motor direction test
-│   ├── test_level_shifter.py         # Level shifter communication test
+│   ├── test_stop.py                  # Immediate motor kill switch
 │   └── ...
-└── docs/                             # Hardware & operating system technical documentation
-    ├── auto-backup-n-saving-errors.txt
+└── docs/                             # Hardware & OS documentation (English & Korean)
     ├── battery-capacity-plan.txt
+    ├── battery-capacity-plan-ko.txt
     ├── camera-n-battery.txt
-    ├── energy-save.txt
-    └── overlay-filesystem.txt
+    ├── camera-n-battery-ko.txt
+    ├── overlay-filesystem.txt
+    └── overlay-filesystem-ko.txt
 ```
 
 ---
@@ -141,14 +240,15 @@ gemini-robotics-makerspace/
 
 The Raspberry Pi (3.3V logic) communicates with the Roborobo CPU Board (5V logic) through a bidirectional level shifter using **Active-Low Open-Drain** signaling.
 
-| Raspberry Pi Pin (BCM) | Function | Level Shifter | Roborobo CPU Input |
-| :--- | :--- | :--- | :--- |
-| **GPIO 17** | Forward (IN1) | Channel 1 | Motor Forward |
-| **GPIO 27** | Turn Left (IN2) | Channel 2 | Motor Left |
-| **GPIO 22** | Turn Right (IN3) | Channel 3 | Motor Right |
-| **GPIO 23** | Backward (IN4) | Channel 4 | Motor Backward |
-| **GND** | Common Ground | GND | GND |
-| **5V / 3.3V** | Power Rail Reference | HV / LV | VCC |
+| Raspberry Pi Pin (BCM) | Direction | Function | Level Shifter | Roborobo CPU Input/Output |
+| :--- | :--- | :--- | :--- | :--- |
+| **GPIO 17** | Output | Forward (IN1) | Channel 1 | Motor Forward Input |
+| **GPIO 27** | Output | Turn Left (IN2) | Channel 2 | Motor Left Input |
+| **GPIO 22** | Output | Turn Right (IN3) | Channel 3 | Motor Right Input |
+| **GPIO 23** | Output | Backward (IN4) | Channel 4 | Motor Backward Input |
+| **GPIO 24** | Input | Line Signal (`PIN_LINE_SIGNAL`) | Channel 5 | Roborobo IR Reflex Feedback |
+| **GND** | - | Common Ground | GND | GND |
+| **5V / 3.3V** | Power | Power Rail Reference | HV / LV | VCC |
 
 ---
 
@@ -184,16 +284,25 @@ The Raspberry Pi (3.3V logic) communicates with the Roborobo CPU Board (5V logic
    ```
 
 5. **Running the Main Robot System**:
+   You can launch the robot using `start.sh` or direct python invocation:
    ```bash
+   chmod +x start.sh stop.sh
+   ./start.sh
+   # Or directly:
    python3 robot_puppy_core.py
    ```
    Access HUD Dashboard at: `http://<raspberry-pi-ip>:5000`
+
+6. **Emergency Stop**:
+   To immediately halt all motor driving threads, run:
+   ```bash
+   ./stop.sh
+   ```
 
 ---
 
 ## Technical Documentation
 
-- **[gemini-structured-outputs-guide.md](gemini-structured-outputs-guide.md)**: Implementation guide for Pydantic schema enforcement on Gemini API responses.
 - **[docs/](docs/)**: Operational guides covering Raspberry Pi overlay filesystems, battery power management, camera optimization, and automatic fail-safe recovery.
 
 ---
@@ -201,6 +310,8 @@ The Raspberry Pi (3.3V logic) communicates with the Roborobo CPU Board (5V logic
 ## License
 
 This project is released under the [MIT License](LICENSE).
+
+![Gemini Robotics Makerspace Demonstration](./media/scene-2.jpg)
 
 <div style="page-break-before: always;"></div>
 
@@ -214,6 +325,38 @@ This project is released under the [MIT License](LICENSE).
 
 Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육용 키트 CPU 보드를 결합하여 구현한 지능형 로봇 강아지(Robotic Puppy) 코어 시스템입니다. **Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)** 부스 실제 시연용으로 제작되었습니다.
 
+![Gemini Robotics Makerspace 부스 시연](./media/scene-1.jpg)
+
+---
+
+## 왜 만들었는가? (프로젝트 기획 및 비전)
+
+기존의 일반적인 교육용이나 장난감 로봇은 센서 입력을 받아 모터를 굴리는 "단순 기계적 반사"만 수행할 뿐, 주변 환경의 맥락을 이해하고 사물을 구별하며 내면의 감정을 나누는 인지 능력을 갖추지 못했습니다.
+
+본 프로젝트는 **Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)** 부스 시연용으로 기획되었으며, 차가운 회로 기판에 **"디지털 영혼과 인공 생명력"**을 불어넣는 것을 목표로 설계되었습니다. 거대 클라우드 AI(Cortex)와 로컬 초고속 제어 루프(Reflex)를 조화롭게 결합하여:
+- 카메라인 시야 속에서 주인과 장난감, 밥그릇 등 주요 사물을 2D 바운딩 박스로 정밀 인식하고,
+- 자신이 무엇을 보고 무엇을 느끼는지 인공지능 내면의 생각(Thought)을 실시간 독백으로 생성하며,
+- 장난감을 보면 기쁘게 짖고, 밥그릇을 보면 애교 소리를 내며, 테이블 낙하 위험 없이 주인을 안전하게 따라다니는 반려형 지능을 구현했습니다.
+
+---
+
+## 어떤 방식으로 동작하는가? (운영 및 제어 메커니즘)
+
+로봇은 고수준 인공지능과 저수준 하드웨어 제어가 유기적으로 협응하는 **이중 하이브리드 아키텍처**로 동작합니다:
+
+1. **Cortex 레이어 (클라우드 대뇌 피질)**:
+   - 카메라 프레임 스냅샷을 클라우드 Gemini API (`gemini-robotics-er-1.6-preview` 및 `gemini-2.5-flash`)에 비동기 송출합니다.
+   - 의미론적 맥락 분석, 다중 오브젝트 인식, 감정 독백 생성 및 정서적 행동 지시를 하달합니다.
+2. **Reflex 레이어 (로컬 고속 반사 신경)**:
+   - 라즈베리 파이 4B 로컬 단에서 OpenCV Haar Cascade 얼굴 추적을 30 FPS 속도로 실행합니다 (CPU 부하 감소를 위해 320x240 해상도 연산).
+   - 클라우드 네트워크 지연 시간과 무관하게 주인의 위치와 거리를 실시간으로 맞추며 추종합니다.
+3. **Auditory 레이어 (청각 신경)**:
+   - `SpeechRecognition`을 통해 마이크 음성을 수신하여 한국어 및 영어 음성 명령("이리와", "인사", "멈춰", "Come here", "Hello", "Stop")을 감지하고 동작시킵니다.
+4. **오도메트리 & 테이블 안전 레이어**:
+   - `1200mm x 800mm` 가상 테이블 위에서 2D 좌표 `(X, Y, Heading)`를 실시간 연산하고, 경계 접근 시 외적(Cross Product) 수식 $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$을 연산하여 중앙 원점으로 자동 복귀합니다.
+5. **하드웨어 MCU 반사 레이어 (`./robo-rogic-code/`)**:
+   - 로보로보 CPU 보드의 Rogic 코드가 전면 적외선 센서 2개(바닥 띠 및 낭떠러지 감지)와 후면 적외선 센서 1개(후방 벽/장애물 접근 감지)를 하드웨어 수준에서 직접 제어하여 물러서도록 가동합니다.
+
 ---
 
 ## 아키텍처 개요
@@ -224,33 +367,40 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 - **전면 적외선 센서 2개 (바닥 방향)**: 바닥면을 지속적으로 감시하여 검은색 띠가 나타나거나 바닥이 사라지는 경계(낙하 위험)를 감지하면 로봇이 즉시 멈추고 물러서도록 동작합니다.
 - **후면 적외선 센서 1개 (후방 방향)**: 뒷면을 바라보는 적외선 센서가 벽이나 장애물이 가까워지는 것을 감지하면 로봇이 멈추고 안전거리를 확보하도록 물러서게 설정되어 있습니다.
 
-```text
-+-----------------------------------------------------------------------------------+
-|                                 CORTEX (Cloud AI)                                 |
-|             Google Gemini API (gemini-robotics-er-1.6-preview / flash)            |
-|       바운딩 박스 인식, 다중 오브젝트 감지, 감정 독백(Thought) 도출 및 행동 결정   |
-+-----------------------------------------------------------------------------------+
-                                         |
-                                         v
-+-----------------------------------------------------------------------------------+
-|                              RASPBERRY PI 4B (두뇌)                               |
-|                                                                                   |
-|  +-----------------------+  +----------------------+  +------------------------+  |
-|  |   Reflex (로컬 CV)    |  |  Auditory (청각)     |  |   Virtual Odometry     |  |
-|  |  OpenCV 30 FPS 얼굴   |  | SpeechRecognition    |  |  테이블 경계 이탈 방지 |  |
-|  |  추적 및 정렬 서보    |  | 한국어/영어 음성 인식|  |  가상 좌표 추적기      |  |
-|  +-----------------------+  +----------------------+  +------------------------+  |
-|                                                                                   |
-|  +-----------------------------------------------------------------------------+  |
-|  |                 Flask 웹 대시보드 & MJPEG 비디오 스트리밍                   |  |
-|  +-----------------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------------+
-                                         |
-                                         v (GPIO Active-Low Open-Drain)
-+-----------------------------------------------------------------------------------+
-|                        ROBOROBO CPU BOARD & 액추에이터                            |
-|                     DC 모터 / 레벨 시프터 / 부저 / LED                            |
-+-----------------------------------------------------------------------------------+
+![로봇 하드웨어 진화 과정 (1차 프로토타입 ~ 3차 최종 기체)](./media/prototype-evolution.jpg)
+
+```mermaid
+graph TD
+    subgraph CORTEX ["CORTEX 레이어 (클라우드 AI)"]
+        Gemini["Google Gemini API (gemini-robotics-er-1.6-preview / 2.5-flash)<br/>• 바운딩 박스 인식 & 다중 오브젝트 감지<br/>• 감정 독백(Thought) 도출 및 행동 결정"]
+    end
+
+    subgraph RPI ["라즈베리 파이 4B (메인 두뇌)"]
+        direction TB
+        subgraph LOOPS ["병렬 처리 제어 루프"]
+            Reflex["Reflex (로컬 CV)<br/>OpenCV 30 FPS 얼굴 추적"]
+            Audio["Auditory (청각 신경)<br/>SpeechRecognition 음성 인식"]
+            Odo["Virtual Odometry (오도메트리)<br/>테이블 경계 이탈 방지"]
+        end
+        Flask["Flask 웹 대시보드 (포트 5000)<br/>MJPEG 비디오 스트리밍 & 텔레메트리 HUD"]
+    end
+
+    subgraph LEVELSHIFTER ["양방향 레벨 시프터"]
+        LS["레벨 시프터 (3.3V ↔ 5V 논리 신호 변환)<br/>Active-Low Open-Drain 제어"]
+    end
+
+    subgraph ROBOROBO ["로보로보 CPU 보드 & 센서"]
+        MCU["로보로보 CPU 보드<br/>• MCU 제어 로직 (Rogic Program)<br/>• 적외선 센서 3개 (바닥 2개 / 후방 1개)"]
+    end
+
+    subgraph ACTUATORS ["액추에이터 & 출력부"]
+        ACT["DC 모터 & 출력부<br/>• 듀얼 DC 모터 (전후좌우 주행)<br/>• 부저 & 상태 LED"]
+    end
+
+    Gemini -->|"비동기 스냅샷 & 텔레메트리"| RPI
+    RPI -->|"3.3V GPIO 신호"| LEVELSHIFTER
+    LEVELSHIFTER -->|"5V 논리 신호 & 센서 피드백"| ROBOROBO
+    ROBOROBO -->|"모터 구동 출력"| ACTUATORS
 ```
 
 ---
@@ -266,9 +416,10 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
    - 30 FPS 주기의 OpenCV Haar Cascade 기반 로컬 얼굴 감지 및 정렬 루프.
    - 감지된 대상과의 거리에 따라 전진, 후진, 좌/우 회전 제어를 수행하여 주인을 화면 중앙에 고정하고 적정 거리를 유지합니다.
 
-3. **Auditory 레이어 (음성 제어)**
-   - `SpeechRecognition` 및 `PyAudio`를 활용하여 마이크 입력을 실시간 감지합니다.
-   - 한국어 및 영어 음성 명령("이리와", "인사", "멈춰", "Come here", "Hello", "Stop")을 지원합니다.
+3. **Auditory 레이어 (음성 제어 & Gemini Live API 스트리밍)**
+   - **Gemini Live API (`gemini-3.1-flash-live-preview`)**를 활용해 마이크 실시간 오디오를 WebSockets 스트리밍하여 인텐트(Intent)를 매칭합니다.
+   - 네트워크 라이브 세션 불가 시 `SpeechRecognition` / `PyAudio` 및 `gemini-2.5-flash`로 자동 대체(Fallback)합니다.
+   - 다국어 및 한국어 음성 명령 지원: `이리와` (come), `멈춰` / `정지` (stop), `돌아` (spin), `앞으로` (forward), `뒤로` (backward), `인사` / `안녕` (greet), `짖어` / `멍멍` (bark).
 
 4. **오도메트리 & 테이블 안전 시스템**
    - 센서가 라즈베리 파이에 직접 연결되지 않은 환경을 극복하기 위해 소프트웨어 기반 가상 좌표 추적 `(X, Y, Heading)`을 가동합니다.
@@ -316,6 +467,59 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 
 ---
 
+## 현장 실전 시연 시나리오 및 기능 검증
+
+시스템에는 4가지 핵심 인터랙티브 시연 시나리오가 내장되어 있습니다:
+
+1. **눈맞춤 및 거리 추종 시연 (Reflex)**:
+   - 관람객이 카메라 정면(0.5m~1.5m)에 서면 30 FPS 속도로 얼굴 축을 계산하여 중앙을 유지합니다. 멀어지면 전진하고, 너무 가까워지면 뒤로 물러납니다.
+2. **사물 인지 및 감정 반응 시연 (Cortex)**:
+   - 장난감 뼈다귀나 사료 그릇을 카메라에 보여주면 Gemini Cortex가 2D 바운딩 박스로 인식하여 독백(Thought)을 출력하고 기쁘게 짖거나 애교 소리를 내는 특수 동작을 수행합니다.
+3. **양방향 음성 제어 시연 (Auditory)**:
+   - 마이크에 대고 자연어 명령("이리와", "인사", "멈춰", "Come here", "Hello", "Stop")을 말하면 구글 STT 분석을 거쳐 로봇이 해당 동작을 가동합니다.
+4. **테이블 경계 구출 및 안전 제어 (Odometry)**:
+   - 로봇을 테이블 모서리 방향으로 이동시키면 가상 경계(`1200mm x 800mm`) 접근 시 멈춰 서서 외적 수식 $\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$을 연산해 중앙 안쪽으로 우아하게 회전해 복귀합니다.
+
+---
+
+## 자주 묻는 질문 (FAQ)
+
+- **Q: 비전 처리를 전부 클라우드로 보내서 하나요?**
+  - **A**: 아닙니다! **하이브리드 분산 처리** 방식입니다. 지연 시간이 없어야 하는 얼굴 추종(Reflex)은 라즈베리 파이 로컬에서 OpenCV로 30 FPS 고속 처리하며, 사물 분류 및 감정 독백 생성(Cortex)은 클라우드 Gemini API로 비동기 수신합니다.
+- **Q: 인터넷 연결이 끊기거나 지연되면 어떻게 되나요?**
+  - **A**: `gemini-robotics-er-1.6-preview` 통신 실패 시 `gemini-2.5-flash` 모델로 자동 대체(Fallback)되거나 로컬 Simulation Mind 모드로 전환되어 기본 움직임과 안전 모드가 끊김 없이 가동됩니다.
+- **Q: 대시보드에 'Uncertainty Limit Exceeded' 경고가 뜨고 멈추면 어떻게 하나요?**
+  - **A**: 고장이 아닙니다! 오픈루프 주행 누적 오차가 250mm를 초과했을 때 낙하를 막는 **Fail-Safe 안전 장치**입니다. 대시보드 화면에서 **`[Reset Odometry]` / `[Re-home]`** 버튼을 클릭하면 좌표가 원점으로 보정되어 정상 복귀합니다.
+
+---
+
+## 고급 기능: Pydantic Structured Outputs 전환 가이드
+
+Gemini API 응답의 파싱 에러율을 0.0%로 수렴시키기 위해 `google-genai==2.10.0` SDK의 `response_schema` 옵션을 활용하여 Pydantic 모델을 정의할 수 있습니다:
+
+```python
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
+class DetectedObject(BaseModel):
+    box_2d: List[int] = Field(..., description="[ymin, xmin, ymax, xmax] 정수 스케일 좌표")
+    label: str = Field(..., description="사물 명칭 (예: 'toy bone', 'food bowl')")
+
+class PuppyBrainResponse(BaseModel):
+    owner_box: Optional[List[int]] = Field(None, description="주인 바운딩 박스 좌표")
+    detected_objects: List[DetectedObject] = Field(default_factory=list)
+    thought: str = Field(..., description="로봇의 내면 생각 독백")
+
+# API 호출 설정
+config = types.GenerateContentConfig(
+    response_mime_type="application/json",
+    response_schema=PuppyBrainResponse,
+    temperature=0.3
+)
+```
+
+---
+
 ## 디렉토리 구조
 
 ```text
@@ -323,23 +527,29 @@ gemini-robotics-makerspace/
 ├── robot_puppy_core.py               # 메인 두뇌 제어기 & Flask HUD 웹 서버
 ├── robot_controller.py               # 로컬 GPIO 모터 제어 & 오도메트리 엔진
 ├── check_env.py                      # 환경 및 Gemini API 통신 진단 도구
+├── start.sh                          # 가동 스크립트 (가상환경 활성화 및 권한 승격 실행)
+├── stop.sh                           # 긴급 정지 스크립트 (모든 DC 모터 정지)
 ├── requirements.txt                  # 파이썬 의존성 패키지 명세
 ├── .env.example                      # 환경변수 템플릿
-├── gemini-structured-outputs-guide.md# Gemini Pydantic 구조화 출력 전환 가이드
 ├── LICENSE                           # MIT 오픈소스 라이선스
+├── media/                            # 부스 시연 사진 및 1024px 압축 리소스
+│   ├── scene-1.jpg
+│   ├── scene-2.jpg
+│   └── ...
 ├── robo-rogic-code/                 # 로보로보 CPU 마이크로컨트롤러용 Rogic 코드 (.rpj)
 │   └── robo-raspi-ifelse-avoid-black-line.rpj
 ├── __tests_and_diagnostics/          # 하드웨어 자가 진단 스크립트 모음
 │   ├── diagnose_pins.py              # GPIO 핀 테스트
 │   ├── test_motor.py                 # 모터 방향 테스트
-│   ├── test_level_shifter.py         # 레벨 시프터 통신 테스트
+│   ├── test_stop.py                  # 모터 킬 스위치
 │   └── ...
-└── docs/                             # 카메라, 배터리, 오버레이 파일시스템 운영 문서
-    ├── auto-backup-n-saving-errors.txt
+└── docs/                             # 카메라, 배터리, 오버레이 파일시스템 문서 (영문 & 한국어 번역)
     ├── battery-capacity-plan.txt
+    ├── battery-capacity-plan-ko.txt
     ├── camera-n-battery.txt
-    ├── energy-save.txt
-    └── overlay-filesystem.txt
+    ├── camera-n-battery-ko.txt
+    ├── overlay-filesystem.txt
+    └── overlay-filesystem-ko.txt
 ```
 
 ---
@@ -348,14 +558,15 @@ gemini-robotics-makerspace/
 
 라즈베리 파이(3.3V 논리레벨)와 로보로보 CPU 보드(5V 논리레벨)는 양방향 레벨 시프터를 거쳐 **Active-Low Open-Drain** 신호로 연결됩니다.
 
-| 라즈베리 파이 핀 (BCM) | 기능 | 레벨 시프터 | 로보로보 CPU 입력 |
-| :--- | :--- | :--- | :--- |
-| **GPIO 17** | 전진 (IN1) | 채널 1 | 모터 전진 |
-| **GPIO 27** | 좌회전 (IN2) | 채널 2 | 모터 좌회전 |
-| **GPIO 22** | 우회전 (IN3) | 채널 3 | 모터 우회전 |
-| **GPIO 23** | 후진 (IN4) | 채널 4 | 모터 후진 |
-| **GND** | 공통 접지 | GND | GND |
-| **5V / 3.3V** | 전원 레일 | HV / LV | VCC |
+| 라즈베리 파이 핀 (BCM) | 입출력 방향 | 기능 | 레벨 시프터 | 로보로보 CPU 입력/출력 |
+| :--- | :--- | :--- | :--- | :--- |
+| **GPIO 17** | Output | 전진 (IN1) | 채널 1 | 모터 전진 입력 |
+| **GPIO 27** | Output | 좌회전 (IN2) | 채널 2 | 모터 좌회전 입력 |
+| **GPIO 22** | Output | 우회전 (IN3) | 채널 3 | 모터 우회전 입력 |
+| **GPIO 23** | Output | 후진 (IN4) | 채널 4 | 모터 후진 입력 |
+| **GPIO 24** | Input | 라인 신호 (`PIN_LINE_SIGNAL`) | 채널 5 | 로보로보 적외선 반사 신호 수신 |
+| **GND** | - | 공통 접지 | GND | GND |
+| **5V / 3.3V** | Power | 전원 레일 | HV / LV | VCC |
 
 ---
 
@@ -391,16 +602,25 @@ gemini-robotics-makerspace/
    ```
 
 5. **메인 로봇 시스템 가동**:
+   `start.sh` 스크립트를 사용하거나 직접 파이썬으로 가동합니다:
    ```bash
+   chmod +x start.sh stop.sh
+   ./start.sh
+   # 또는 직접 실행:
    python3 robot_puppy_core.py
    ```
    동일 네트워크상의 브라우저에서 HUD 대시보드에 접속합니다: `http://<라즈베리파이-IP>:5000`
+
+6. **긴급 모터 정지**:
+   주행 중 모터를 즉시 강제 정지시키려면 다음 명령을 실행합니다:
+   ```bash
+   ./stop.sh
+   ```
 
 ---
 
 ## 기술 문서 안내
 
-- **[gemini-structured-outputs-guide.md](gemini-structured-outputs-guide.md)**: Gemini API 응답을 Pydantic 규격으로 강제하기 위한 가이드.
 - **[docs/](docs/)**: 라즈베리 파이 오버레이 파일시스템, 전원 관리 및 카메라 관련 기술 문서.
 
 ---
@@ -408,3 +628,5 @@ gemini-robotics-makerspace/
 ## 라이선스
 
 본 프로젝트는 [MIT License](LICENSE)에 따라 자유롭게 이용 및 수정이 가능합니다.
+
+![Gemini Robotics Makerspace 시연 모습](./media/scene-2.jpg)

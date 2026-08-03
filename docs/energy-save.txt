@@ -33,7 +33,7 @@ TOTAL CURRENT SAVED:                 670mA to 1,170mA (Hits the 1A Target)
 3. CONFIGURATION FILE MODIFICATIONS (/boot/firmware/config.txt)
 --------------------------------------------------------------------------------
 Open configuration file:
-$ sudo nano /boot/firmware/config.txt
+$ sudo vi /boot/firmware/config.txt
 (Note: Use /boot/config.txt on older OS versions)
 
 Append the following lines to disable onboard components and underclock limits:
@@ -65,7 +65,7 @@ Wi-Fi runtime power, execute or automate the following commands:
 
 * Automate Complete USB Shutdown on Boot:
   Open system boot script:
-  $ sudo nano /etc/rc.local
+  $ sudo vi /etc/rc.local
 
   Add this exact line directly ABOVE the 'exit 0' line:
   echo '1-1' | tee /sys/bus/usb/drivers/usb/unbind

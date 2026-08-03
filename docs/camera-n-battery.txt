@@ -29,7 +29,7 @@ processing to the VideoCore hardware ISP and keeping CPU usage near 0%.
 To automate Wi-Fi power-saving and headlessly launch the camera stream on boot:
 
 * Open the system boot script:
-  $ sudo nano /etc/rc.local
+  $ sudo vi /etc/rc.local
 
 * Append the following blocks directly ABOVE your previous USB unbind line 
   and the final 'exit 0' line:
@@ -64,7 +64,7 @@ Monitor the Pi's internal voltage threshold to safely halt the operating system
 before hardware power cuts completely out.
 
 * Create the monitor script:
-  $ nano /home/pi/battery_monitor.sh
+  $ vi /home/pi/battery_monitor.sh
 
 * Paste the following code:
   #!/bin/bash

@@ -33,7 +33,7 @@
 3. 설정 파일 수정 (/boot/firmware/config.txt)
 --------------------------------------------------------------------------------
 설정 파일 열기:
-$ sudo nano /boot/firmware/config.txt
+$ sudo vi /boot/firmware/config.txt
 (참고: 이전 OS 버전에서는 /boot/config.txt 사용)
 
 다음 줄들을 추가하여 온보드 부품을 비활성화하고 언더클럭 제한을 설정합니다:
@@ -65,7 +65,7 @@ over_voltage=-2
 
 * 부팅 시 USB 완전 차단 자동화:
   시스템 부팅 스크립트 열기:
-  $ sudo nano /etc/rc.local
+  $ sudo vi /etc/rc.local
 
   'exit 0' 줄 바로 위에 다음 줄을 정확히 추가:
   echo '1-1' | tee /sys/bus/usb/drivers/usb/unbind

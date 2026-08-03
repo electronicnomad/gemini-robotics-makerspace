@@ -8,7 +8,7 @@
 (보조 USB 플래시 드라이브 또는 네트워크 저장소 공유 폴더)로 백업하는 것이 좋습니다.
 
 * 백업 스크립트 파일 생성:
-  $ nano /home/pi/backup_configs.sh
+  $ vi /home/pi/backup_configs.sh
 
 * 다음 코드를 파일에 붙여넣기:
   #!/bin/bash
@@ -36,7 +36,7 @@
 에러가 발생하면, 오버레이 시스템이 활성화되어 있거나 안전하지 않은 종료로 인해 
 파일시스템이 자동으로 읽기 전용으로 마운트된 것입니다.
 
-* 증상: Nano 편집기에서 "[ Error writing ...: Read-only file system ]" 표시
+* 증상: vi 편집기에서 "[ Error writing ...: Read-only file system ]" 또는 "E45: 'readonly' option is set" 표시
 * 증상: touch 또는 mkdir 명령어가 즉시 실패함
 
 * 빠른 해결책 1: 긴급 임시 쓰기 권한 확보 (재부팅 없이 적용)

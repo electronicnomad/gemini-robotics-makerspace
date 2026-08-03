@@ -9,11 +9,11 @@ up your critical configuration scripts to an external source (like a secondary
 USB flash drive or a network storage share).
 
 * Create the backup script file:
-  $ nano /home/pi/backup_configs.sh
+  $ vi /home/pi/backup_configs.sh
 
 * Paste the following code into the file:
   #!/bin/bash
-  # Define target directory (Update this path to your mounted backup drive)
+  # Define backup directory (Modify to your mounted backup drive path)
   BACKUP_DIR="/mnt/backup_drive/pi_power_project"
   mkdir -p "$BACKUP_DIR"
 
@@ -22,22 +22,22 @@ USB flash drive or a network storage share).
   cp /etc/rc.local "$BACKUP_DIR/rc.local.bak"
   cp /home/pi/battery_monitor.sh "$BACKUP_DIR/battery_monitor.sh.bak"
 
-  echo "System configurations successfully backed up to $BACKUP_DIR"
+  echo "System configurations backed up successfully to $BACKUP_DIR."
 
-* Make the script executable:
+* Grant execution permissions to the script:
   $ chmod +x /home/pi/backup_configs.sh
 
-* Run it manually anytime before enabling the overlay filesystem:
+* Run manually anytime before enabling the overlay filesystem:
   $ /home/pi/backup_configs.sh
 
 
-2. TROUBLESHOOTING FILE SAVE ERRORS (READ-ONLY FAILURES)
+2. Troubleshooting File Save Errors (Read-Only Errors)
 --------------------------------------------------------------------------------
-If you try to save a file or modify a setting and receive a "Read-only file 
-system" or "Permission denied" error, it means your overlay system is active, 
-or your filesystem has auto-mounted as read-only due to an unsafe shutdown.
+When trying to save files or modify configurations, if you receive "Read-only file system"
+or "Permission denied" errors, either the overlay system is active, or an unclean shutdown
+caused the filesystem to automatically mount as Read-Only.
 
-* Symptom: Nano displays "[ Error writing ...: Read-only file system ]"
+* Symptom: vi displays "[ Error writing ...: Read-only file system ]" or "E45: 'readonly' option is set"
 * Symptom: Touch or mkdir commands fail immediately.
 
 * Quick Fix 1: Emergency Temporary Write Access (Without Rebooting)
