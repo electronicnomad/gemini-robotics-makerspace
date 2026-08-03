@@ -75,6 +75,40 @@ The physical robot is constructed using the [ROBO KIT STEP 1 to 3](https://robor
 
 ---
 
+## Detailed Threading & Execution Architecture
+
+The system achieves low latency by distributing tasks across **5 background daemon threads** and **1 main Flask server thread**:
+
+| Thread | Function Name | Role & Responsibilities | Optimization & Synchronization |
+| :--- | :--- | :--- | :--- |
+| **Thread 0 (Camera)** | `camera_capture_thread` | Captures VGA (640x480) camera frames into memory | Synchronized via `camera_lock` to eliminate I/O bottleneck |
+| **Thread 1 (Reflex)** | `vision_control_thread` | Runs OpenCV Haar Cascade face tracking (30 FPS) and distance alignment | Downsampled to 320x240 for low CPU usage; updates Odometry |
+| **Thread 2 (Auditory)** | `audio_recognition_thread` | Listens for Korean (`ko-KR`) and English (`en-US`) voice commands | Protected by `is_robot_busy` lock to prevent motor conflict |
+| **Thread 3 (Cortex)** | `gemini_brain_thread` | Uploads snapshot to Gemini API for 2D bounding boxes & inner thoughts | Async Cortex processing; fallback to `gemini-2.5-flash` on limit |
+| **Thread 4 (Encoder)** | `streaming_encoder_thread` | Encodes RAW frames into JPEG byte streams for HUD dashboard | Decouples video encoding load from real-time control loops |
+| **Main Web Server** | `app.run` | Serves MJPEG video feed, telemetry API, and manual odometry resets | Flask micro web server on Port 5000 |
+
+---
+
+## Mathematics of Odometry & Safety Boundaries
+
+1. **Cross-Product Boundary Recovery Formula**:
+   When the robot exceeds the virtual table perimeter (`1200mm x 800mm`), it calculates the cross-product vector from its current coordinates `(X, Y)` and heading angle `θ`:
+   $$\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$$
+   - If $\text{cross\_product} > 0$: Center origin is to the left -> Execute `turn_left()`
+   - If $\text{cross\_product} < 0$: Center origin is to the right -> Execute `turn_right()`
+
+2. **Open-Loop Fail-Safe Uncertainty Accumulator**:
+   Open-loop odometry accumulates drift over time. The system tracks an estimated position uncertainty value:
+   - $+0.04\text{mm}$ error added per $1\text{mm}$ driven (~4% distance error)
+   - $+0.25\text{mm}$ error added per $1^\circ$ turned (~15mm error per 60° rotation)
+   - When accumulated uncertainty exceeds **$250\text{mm}$**, the robot halts driving and requests operator re-homing for safety.
+
+3. **Hardware Race-Condition Protection**:
+   All low-level GPIO pin write operations are serialized using `_motor_lock` (Threading Lock) to prevent motor signal corruption when concurrent threads (e.g. emotion expression vs boundary recovery) execute simultaneously.
+
+---
+
 ## Directory Structure
 
 ```text
@@ -85,7 +119,6 @@ gemini-robotics-makerspace/
 ├── requirements.txt                  # Python dependencies
 ├── .env.example                      # Environment variables template
 ├── gemini-structured-outputs-guide.md# Guide for Gemini Pydantic structured output migration
-├── project-analysis-report.md        # Technical architecture analysis report
 ├── LICENSE                           # Open source MIT license
 ├── robo-rogic-code/                 # Rogic Program MCU code (.rpj) for Roborobo kit
 │   └── robo-raspi-ifelse-avoid-black-line.rpj
@@ -160,7 +193,6 @@ The Raspberry Pi (3.3V logic) communicates with the Roborobo CPU Board (5V logic
 
 ## Technical Documentation
 
-- **[project-analysis-report.md](project-analysis-report.md)**: Detailed report on threading architecture, safety odometry mathematics, and cross-product recovery algorithms.
 - **[gemini-structured-outputs-guide.md](gemini-structured-outputs-guide.md)**: Implementation guide for Pydantic schema enforcement on Gemini API responses.
 - **[docs/](docs/)**: Operational guides covering Raspberry Pi overlay filesystems, battery power management, camera optimization, and automatic fail-safe recovery.
 
@@ -250,6 +282,40 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 
 ---
 
+## 상세 스레딩 및 실행 아키텍처
+
+병목 현상을 방지하고 반응 속도를 최적화하기 위해 **5개의 백그라운드 데몬 스레드**와 **1개의 메인 Flask 서버 스레드**로 역할을 분담합니다:
+
+| 스레드명 | 타깃 함수 | 역할 및 주요 기능 | 최적화 및 동기화 |
+| :--- | :--- | :--- | :--- |
+| **Thread 0 (카메라)** | `camera_capture_thread` | USB 카메라(640x480 VGA) 프레임을 지속 수신하여 캐싱 | `camera_lock`으로 동기화하여 I/O 병목 차단 |
+| **Thread 1 (Reflex)** | `vision_control_thread` | 30 FPS 주기의 OpenCV Haar Cascade 얼굴 추적 및 거리 정렬 | 320x240 절반 축소 연산으로 CPU 점유율 대폭 절감, 오도메트리 연산 |
+| **Thread 2 (Auditory)** | `audio_recognition_thread` | 한국어(`ko-KR`) 및 영어(`en-US`) 음성 명령 인식 | `is_robot_busy` 락으로 모터 제어 충돌 차단 |
+| **Thread 3 (Cortex)** | `gemini_brain_thread` | Gemini API에 스냅샷을 비동기 업로드하여 감정 및 객체 인식 | API 오류 시 `gemini-2.5-flash`로 자동 대체(Fallback) |
+| **Thread 4 (인코더)** | `streaming_encoder_thread` | RAW 프레임을 대시보드 송출용 JPEG 스트림으로 압축 캐싱 | 비디오 인코딩 부하와 제어 루프를 완전히 분리 |
+| **Main Web Server** | `app.run` | MJPEG 비디오 송출, 텔레메트리 API, 오도메트리 리셋 가동 | 포트 5000 Flask 마이크로 웹서버 |
+
+---
+
+## 오도메트리 및 안전 경계 연산 수식
+
+1. **외적(Cross-Product) 경계 복귀 수식**:
+   로봇이 테이블 가상 경계(`1200mm x 800mm`)를 이탈하면, 현재 좌표 `(X, Y)`와 진행 각도 `θ`를 기반으로 원점 방향 외적을 계산합니다:
+   $$\text{cross\_product} = X \cdot \sin(\theta) - Y \cdot \cos(\theta)$$
+   - $\text{cross\_product} > 0$ 인 경우: 원점이 로봇 기준 좌측에 위치 -> 좌회전(`turn_left`) 실행
+   - $\text{cross\_product} < 0$ 인 경우: 원점이 로봇 기준 우측에 위치 -> 우회전(`turn_right`) 실행
+
+2. **오픈루프 위치 불확실성 누적기 (Fail-Safe)**:
+   엔코더가 없는 오픈루프 주행 오차 누적에 대비하여 불확실성 연산치를 지속 누적합니다:
+   - 주행 $1\text{mm}$ 당 $+0.04\text{mm}$ 오차 누적 (이동 거리의 약 4%)
+   - 회전 $1^\circ$ 당 $+0.25\text{mm}$ 오차 누적 (60° 회전 시 약 15mm 오차)
+   - 누적 불확실성이 **$250\text{mm}$**를 초과하면 로봇 주행을 정지하고 원점 재배치(Re-home)를 요청합니다.
+
+3. **하드웨어 레이스 조건 방지 (`_motor_lock`)**:
+   감정 표현 스레드와 오도메트리 경계 복귀 스레드가 물리 GPIO 핀에 동시에 접근할 때 발생하는 구동 신호 꼬임을 방지하기 위해 로우레벨 GPIO 쓰기 구문 전체를 `_motor_lock` (Threading Lock)으로 직렬화했습니다.
+
+---
+
 ## 디렉토리 구조
 
 ```text
@@ -260,7 +326,6 @@ gemini-robotics-makerspace/
 ├── requirements.txt                  # 파이썬 의존성 패키지 명세
 ├── .env.example                      # 환경변수 템플릿
 ├── gemini-structured-outputs-guide.md# Gemini Pydantic 구조화 출력 전환 가이드
-├── project-analysis-report.md        # 시스템 아키텍처 상세 분석 보고서
 ├── LICENSE                           # MIT 오픈소스 라이선스
 ├── robo-rogic-code/                 # 로보로보 CPU 마이크로컨트롤러용 Rogic 코드 (.rpj)
 │   └── robo-raspi-ifelse-avoid-black-line.rpj
@@ -335,7 +400,6 @@ gemini-robotics-makerspace/
 
 ## 기술 문서 안내
 
-- **[project-analysis-report.md](project-analysis-report.md)**: 멀티스레딩 구조, 오도메트리 수학 공식을 다룬 시스템 분석 보고서.
 - **[gemini-structured-outputs-guide.md](gemini-structured-outputs-guide.md)**: Gemini API 응답을 Pydantic 규격으로 강제하기 위한 가이드.
 - **[docs/](docs/)**: 라즈베리 파이 오버레이 파일시스템, 전원 관리 및 카메라 관련 기술 문서.
 
