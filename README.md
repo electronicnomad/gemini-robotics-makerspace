@@ -12,10 +12,10 @@ A hybrid robotics architecture combining cloud-based multimodal AI (Cortex) with
 
 ## Why We Built It (Motivation & Vision)
 
-Created for the [Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)](https://cloudonair.withgoogle.com/events/gemini-playground) exhibition booth, this project powered by **Google Gemini Robotics-ER 1.6 Preview** was born out of a clear core philosophy: **to showcase the breakthrough capabilities and superiority of Google's flagship embodied AI model not through abstract text or benchmark papers, but through a physical, living machine interacting in real time.**
+Created for the [Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)](https://cloudonair.withgoogle.com/events/gemini-playground) exhibition booth, this project powered by [Google Gemini Robotics-ER 1.6 Preview](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview) was born out of a clear core philosophy: **to showcase the breakthrough capabilities and superiority of Google's flagship embodied AI model not through abstract text or benchmark papers, but through a physical, living machine interacting in real time.**
 
-By fusing the high-level cloud intelligence of **Gemini Robotics-ER 1.6 Preview** (Cortex) with a high-speed local control loop (Reflex), the robot puppy "Toto" gains a true "digital soul":
-- **Spatial Object Perception**: Leverages Gemini Robotics-ER's spatial intelligence to pinpoint owners, toys, and food bowls in 2D space (`[ymin, xmin, ymax, xmax]` normalized coordinates).
+By fusing the high-level cloud intelligence of [Gemini Robotics-ER 1.6 Preview](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview) (Cortex) with a high-speed local control loop (Reflex), the robot puppy "Toto" gains a true "digital soul":
+- **Spatial Object Perception**: Leverages [Gemini Robotics-ER](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview)'s spatial intelligence to pinpoint owners, toys, and food bowls in 2D space (`[ymin, xmin, ymax, xmax]` normalized coordinates).
 - **Inner Monologue**: Generates real-time emotional thoughts explaining what the robot perceives and how it feels as a living companion.
 - **Embodied Expressiveness**: Translates cloud AI reasoning into physical motor actions—barking joyfully for toys, whining/beeping for food, and tracking its owner's face while remaining safely bounded on a table via dead-reckoning odometry.
 
@@ -89,7 +89,7 @@ graph TD
 ## Key Features
 
 1. **Cortex Layer (Cloud Multimodal AI)**
-   - Uses `gemini-robotics-er-1.6-preview` (with automatic fallback to `gemini-2.5-flash`) via the `google-genai` SDK.
+   - Uses [`gemini-robotics-er-1.6-preview`](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview) (with automatic fallback to `gemini-2.5-flash`) via the `google-genai` SDK.
    - Detects the owner, toys, food bowls, and objects using 2D normalized bounding boxes.
    - Generates emotional thoughts and triggers contextual behaviors (e.g., barking joyfully for toys, whiping/beeping for food).
 
@@ -342,10 +342,10 @@ Google Cloud Gemini API와 라즈베리 파이 4B, 그리고 로보로보 교육
 
 기존의 일반적인 교육용이나 장난감 로봇은 센서 입력을 받아 모터를 굴리는 "단순 기계적 반사"만 수행할 뿐, 주변 환경의 맥락을 이해하고 사물을 구별하며 내면의 감정을 나누는 인지 능력을 갖추지 못했습니다.
 
-본 프로젝트는 [Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)](https://cloudonair.withgoogle.com/events/gemini-playground) 부스 시연용으로 기획되었으며, **Google Gemini Robotics-ER 1.6 Preview** 모델을 탑재했습니다. 핵심 기획 의도는 "Google Gemini 최첨단 로보틱스 AI의 뛰어난 성능과 가능성을 단순한 말과 글, 텍스트 논문이 아닌 현실 세계에서 물리적으로 동작하는 실제 기계로 생생하게 증명하는 것"이었습니다.
+본 프로젝트는 [Google AI + Live Labs, Gemini Playground (Gemini Robotics Makerspace)](https://cloudonair.withgoogle.com/events/gemini-playground) 부스 시연용으로 기획되었으며, [Google Gemini Robotics-ER 1.6 Preview](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview) 모델을 탑재했습니다. 핵심 기획 의도는 "Google Gemini 최첨단 로보틱스 AI의 뛰어난 성능과 가능성을 단순한 말과 글, 텍스트 논문이 아닌 현실 세계에서 물리적으로 동작하는 실제 기계로 생생하게 증명하는 것"이었습니다.
 
-차가운 회로 기판에 Gemini Robotics-ER 1.6 Preview가 제공하는 "디지털 영혼과 인공 생명력"을 불어넣어 거대 클라우드 AI(Cortex)와 로컬 초고속 제어 루프(Reflex)를 조화롭게 결합했습니다:
-- **공간 사물 정밀 인지**: Gemini Robotics-ER 모델의 정밀한 2D 공간 인지 능력을 활용해 시야 속 주인과 장난감, 밥그릇 등 주요 사물을 정밀하게 감지하고,
+차가운 회로 기판에 [Gemini Robotics-ER 1.6 Preview](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview)가 제공하는 "디지털 영혼과 인공 생명력"을 불어넣어 거대 클라우드 AI(Cortex)와 로컬 초고속 제어 루프(Reflex)를 조화롭게 결합했습니다:
+- **공간 사물 정밀 인지**: [Gemini Robotics-ER](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview) 모델의 정밀한 2D 공간 인지 능력을 활용해 시야 속 주인과 장난감, 밥그릇 등 주요 사물을 정밀하게 감지하고,
 - **내면의 생각(Thought) 생성**: 자신이 무엇을 보고 무엇을 느끼는지 인공지능의 내면 독백을 실시간 텍스트로 도출하며,
 - **체화된 지능형 행동**: 클라우드 AI 추론 결과를 실제 물리 모터 동작으로 연결하여, 장난감을 보면 기쁘게 짖고, 밥그릇을 보면 애교 소리를 내며, 테이블 낙하 위험 없이 주인을 안전하게 따라다니는 반려형 지능을 완벽히 구현했습니다.
 
@@ -419,7 +419,7 @@ graph TD
 ## 주요 기능
 
 1. **Cortex 레이어 (클라우드 인공지능)**
-   - `google-genai` SDK를 통해 `gemini-robotics-er-1.6-preview` 모델을 가동하고 예외 발생 시 `gemini-2.5-flash`로 자동 대체(Fallback)됩니다.
+   - `google-genai` SDK를 통해 [`gemini-robotics-er-1.6-preview`](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-1.6-preview) 모델을 가동하고 예외 발생 시 `gemini-2.5-flash`로 자동 대체(Fallback)됩니다.
    - 카메라 프레임에서 주인(Owner), 장난감, 밥그릇 등 주요 사물을 2D Bounding Box 단위로 감지합니다.
    - 로봇의 감정을 독백 형태의 Thought으로 생성하며, 장난감 감지 시 짖고 꼬리를 치거나 밥그릇 감지 시 소리를 내는 등 상호작용합니다.
 
