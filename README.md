@@ -235,11 +235,6 @@ gemini-robotics-makerspace/
 │   └── ...
 ├── robo-rogic-code/                 # Rogic Program MCU code (.rpj) for Roborobo kit
 │   └── robo-raspi-ifelse-avoid-black-line.rpj
-├── __tests_and_diagnostics/          # Hardware diagnostic scripts
-│   ├── diagnose_pins.py              # GPIO pin tester
-│   ├── test_motor.py                 # Motor direction test
-│   ├── test_stop.py                  # Immediate motor kill switch
-│   └── ...
 └── docs/                             # Hardware & OS documentation (English & Korean)
     ├── battery-capacity-plan.txt
     ├── battery-capacity-plan-ko.txt
@@ -295,7 +290,6 @@ The Raspberry Pi (3.3V logic) communicates with the Roborobo CPU Board (5V logic
 4. **Hardware & Environment Verification**:
    ```bash
    python3 check_env.py
-   python3 __tests_and_diagnostics/diagnose_pins.py
    ```
 
 5. **Running the Main Robot System**:
@@ -568,11 +562,6 @@ gemini-robotics-makerspace/
 │   └── ...
 ├── robo-rogic-code/                 # 로보로보 CPU 마이크로컨트롤러용 Rogic 코드 (.rpj)
 │   └── robo-raspi-ifelse-avoid-black-line.rpj
-├── __tests_and_diagnostics/          # 하드웨어 자가 진단 스크립트 모음
-│   ├── diagnose_pins.py              # GPIO 핀 테스트
-│   ├── test_motor.py                 # 모터 방향 테스트
-│   ├── test_stop.py                  # 모터 킬 스위치
-│   └── ...
 └── docs/                             # 카메라, 배터리, 오버레이 파일시스템 문서 (영문 & 한국어 번역)
     ├── battery-capacity-plan.txt
     ├── battery-capacity-plan-ko.txt
@@ -628,7 +617,6 @@ gemini-robotics-makerspace/
 4. **환경 및 하드웨어 검증**:
    ```bash
    python3 check_env.py
-   python3 __tests_and_diagnostics/diagnose_pins.py
    ```
 
 5. **메인 로봇 시스템 가동**:
