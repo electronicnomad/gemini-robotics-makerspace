@@ -65,3 +65,8 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# local only
+__backup/
+__legacy/
+__tests_and_diagnostics/
